@@ -90,7 +90,7 @@ export function GameEngine({
   joueurs?: Joueur[];
 }) {
   // ----- État principal -----
-  const [phase, setPhase] = useState<PhaseProtocole>('signal');
+  const [phase, setPhase] = useState<PhaseProtocole>('cadrage');
   const [cardIdx, setCardIdx] = useState(0);
   const [pions, setPions] = useState<Pion[]>([]);
   const [votes, setVotes] = useState<Vote[]>([]);
