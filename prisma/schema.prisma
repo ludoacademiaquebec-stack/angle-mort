@@ -1,0 +1,119 @@
+// ============================================================
+// ANGLE MORT v3.3 — Schéma Prisma
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Session {
+  id               String    @id
+  code             String
+  company          String?
+  facilitatorId    String?   @map("facilitator_id")
+  phase            String    @default("cadrage")
+  cardIdx          Int       @default(-1) @map("card_idx")
+  revealed         String    @default("signal")
+  selectedQuadrant String?   @map("selected_quadrant")
+  allSelectionnees Json      @default("[]") @map("all_selectionnees")
+  startedAt        DateTime  @default(now()) @map("started_at")
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at")
+  status           String    @default("active")
+
+  players SessionPlayer[]
+  depots  SessionDepot[]
+  paris   SessionPari[]
+  reports SessionReport[]
+
+  @@map("sessions")
+}
+
+model SessionPlayer {
+  id              String   @id @default(uuid()) @db.Uuid
+  sessionId       String   @map("session_id")
+  nick            String
+  points          Int      @default(0)
+  jetons          Json     @default("[]")
+  currentQuadrant String?  @map("current_quadrant")
+  lastSeenAt      DateTime @default(now()) @map("last_seen_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  session Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  depots  SessionDepot[]
+  paris   SessionPari[]
+
+  @@index([sessionId])
+  @@map("session_players")
+}
+
+model SessionDepot {
+  id        String   @id @default(uuid()) @db.Uuid
+  sessionId String   @map("session_id")
+  playerId  String   @map("player_id") @db.Uuid
+  cardId    String   @map("card_id")
+  quadrant  String
+  canal     String
+  slot      Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  session Session       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  player  SessionPlayer @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([cardId])
+  @@map("session_depots")
+}
+
+model SessionPari {
+  id           String   @id @default(uuid()) @db.Uuid
+  sessionId    String   @map("session_id")
+  playerId     String   @map("player_id") @db.Uuid
+  cardId       String   @map("card_id")
+  pari         String
+  revele       Boolean  @default(false)
+  pointsGagnes Int      @default(0) @map("points_gagnes")
+  jetonGagne   String?  @map("jeton_gagne")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  session Session       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  player  SessionPlayer @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([cardId])
+  @@map("session_paris")
+}
+
+model SignalCard {
+  id            String  @id
+  famille       String
+  titre         String?
+  image         String?
+  motPiege      String? @map("mot_piege")
+  signal        String?
+  situation     String?
+  question      String?
+  extra         Json?
+  compteur      String?
+  compteurLabel String? @map("compteur_label")
+  niveau        Int?
+  ordre         Int?
+
+  @@map("signal_cards")
+}
+
+model SessionReport {
+  id        String   @id @default(uuid()) @db.Uuid
+  sessionId String   @map("session_id")
+  stats     Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("session_reports")
+}
