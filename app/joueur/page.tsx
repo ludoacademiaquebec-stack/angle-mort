@@ -1,103 +1,83 @@
 'use client';
-
-import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
-
-type SessionActive = {
-  id: string;
-  code: string;
-  company: string | null;
-  phase: string;
-  player_count: number;
-  created_at: string;
-};
+import { useState } from 'react';
+import Link from 'next/link';
+import { supabase } from '@/lib/supabase';
 
 export default function JoueurPage() {
-  const [sessions, setSessions] = useState<SessionActive[]>([]);
-  const [loading, setLoading] = useState(true);
-  const router = useRouter();
+  const [sessionCode, setSessionCode] = useState('');
+  const [pseudo, setPseudo] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [success, setSuccess] = useState('');
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await fetch('/api/sessions-actives');
-        const data = await res.json();
-        setSessions(data.sessions || []);
-      } catch {}
-      setLoading(false);
-    })();
-  }, []);
+  const rejoindre = async () => {
+    setError(''); setLoading(true);
+    if(!sessionCode || !pseudo) { setError('Code session + pseudo requis'); setLoading(false); return; }
+
+    // 1. Vérifie que SESS-XXX existe dans Supabase
+    const { data: sess, error: sessErr } = await supabase.from('sessions').select('*').eq('code', sessionCode).eq('status','active').single();
+    if(sessErr || !sess) { setError(`Session ${sessionCode} introuvable ou inactive. Vérifie avec facilitateur.`); setLoading(false); return; }
+
+    // 2. Crée le joueur dans session_players
+    const { error: playerErr } = await supabase.from('session_players').insert({
+      session_id: sess.id,
+      nick: pseudo,
+      points: 0,
+      jetons: []
+    });
+
+    if(playerErr) { 
+      // Si pseudo déjà pris, on tente quand même d'entrer
+      if(playerErr.message.includes('duplicate')) {
+        setSuccess(`Pseudo déjà pris, mais session ${sessionCode} existe - tu peux rejoindre le plateau.`);
+      } else {
+        setError(playerErr.message); setLoading(false); return;
+      }
+    } else {
+      setSuccess(`Bienvenue ${pseudo}! Tu as rejoint ${sessionCode}`);
+    }
+
+    setLoading(false);
+    // Redirige vers le plateau après 1s
+    setTimeout(()=>{
+      window.location.href = `/board/${sessionCode}?pseudo=${encodeURIComponent(pseudo)}`;
+    }, 1000);
+  };
 
   return (
-    <div style={{ minHeight: '100vh', background: '#F4EFE2', padding: '40px 20px' }}>
-      <div style={{ maxWidth: 720, margin: '0 auto' }}>
-        <div style={{ marginBottom: 32 }}>
-          <div style={{ fontFamily: 'Georgia, serif', fontSize: 32, fontWeight: 700, marginBottom: 8 }}>Sessions en cours</div>
-          <div style={{ fontSize: 14, color: 'rgba(20,23,27,0.6)' }}>
-            Rejoignez une session active de votre organisation
+    <div style={{ minHeight:'100vh', background:'#FFFEF9', color:'#14171B', padding:40 }}>
+      <div style={{ maxWidth:520, margin:'0 auto' }}>
+        <Link href="/" style={{ fontSize:13, opacity:0.6 }}>← Landing</Link>
+        <h1 style={{ fontFamily:'Georgia, serif', fontSize:32, marginTop:16 }}>Espace Joueur - Production</h1>
+        <p style={{ fontSize:14, opacity:0.7, marginBottom:24 }}>Entre le code SESS-XXX partagé par ton facilitateur. Vérifié dans Supabase table sessions → crée session_players.</p>
+
+        <div style={{ background:'#FBF8EF', border:'2px solid #14171B', borderRadius:12, padding:24 }}>
+          <label style={{ fontSize:12, fontWeight:700 }}>Code session (SESS-XXX)</label>
+          <input value={sessionCode} onChange={e=>setSessionCode(e.target.value.toUpperCase())} placeholder="SESS-A1B2C3" style={{ width:'100%', padding:14, marginTop:6, marginBottom:12, border:'1px solid #14171B', borderRadius:6, fontWeight:700, fontSize:15 }} />
+          
+          <label style={{ fontSize:12, fontWeight:700 }}>Ton pseudo / prénom</label>
+          <input value={pseudo} onChange={e=>setPseudo(e.target.value)} placeholder="Marie" style={{ width:'100%', padding:14, marginTop:6, border:'1px solid #14171B', borderRadius:6, fontSize:15 }} />
+
+          {error && <div style={{ background:'#FEE2E2', color:'#DC2626', padding:10, borderRadius:6, fontSize:13, marginTop:12 }}>{error}</div>}
+          {success && <div style={{ background:'#DCFCE7', color:'#166534', padding:10, borderRadius:6, fontSize:13, marginTop:12 }}>{success} → Redirection plateau...</div>}
+
+          <button onClick={rejoindre} disabled={loading} style={{ width:'100%', marginTop:16, padding:16, background:'#14171B', color:'#FBF8EF', borderRadius:6, fontWeight:700, fontSize:15 }}>
+            {loading? 'Vérification Supabase...' : 'Rejoindre la session →'}
+          </button>
+
+          <div style={{ fontSize:11, opacity:0.5, marginTop:12, textAlign:'center' }}>
+            Vérifie: sessions.code EXISTS + status=active → INSERT session_players (session_id, nick)
           </div>
         </div>
 
-        {loading && (
-          <div style={{ textAlign: 'center', padding: 40, color: 'rgba(20,23,27,0.5)', fontSize: 14 }}>
-            Chargement...
-          </div>
-        )}
-
-        {!loading && sessions.length === 0 && (
-          <div style={{ background: '#FBF8EF', border: '1px solid rgba(20,23,27,0.15)', borderRadius: 8, padding: 40, textAlign: 'center' }}>
-            <div style={{ fontFamily: 'Georgia, serif', fontSize: 18, fontWeight: 600, marginBottom: 8 }}>Aucune session active</div>
-            <div style={{ fontSize: 13, color: 'rgba(20,23,27,0.6)', marginBottom: 24 }}>
-              Attendez qu'un facilitateur démarre une session
-            </div>
-            <div style={{ fontSize: 12, color: 'rgba(20,23,27,0.5)' }}>
-              Vous avez un code à 6 chiffres ?
-            </div>
-            <a href="/rejoindre" style={{ display: 'inline-block', marginTop: 12, padding: '10px 20px', background: '#14171B', color: '#FBF8EF', textDecoration: 'none', borderRadius: 4, fontSize: 13, fontWeight: 600 }}>
-              Entrer le code →
-            </a>
-          </div>
-        )}
-
-        {!loading && sessions.length > 0 && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {sessions.map((s) => (
-              <button
-                key={s.id}
-                onClick={() => router.push(`/play/${s.id}`)}
-                style={{
-                  background: '#FBF8EF',
-                  border: '2px solid #14171B',
-                  borderRadius: 8,
-                  padding: 24,
-                  textAlign: 'left',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  gap: 16,
-                  transition: 'all 0.15s',
-                }}
-              >
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontFamily: 'Georgia, serif', fontSize: 20, fontWeight: 700, marginBottom: 4 }}>
-                    {s.company || s.id}
-                  </div>
-                  <div style={{ fontSize: 12, color: 'rgba(20,23,27,0.5)', fontFamily: 'ui-monospace, monospace' }}>
-                    {s.id} · phase {s.phase} · {s.player_count} joueur{s.player_count > 1 ? 's' : ''}
-                  </div>
-                </div>
-                <div style={{ padding: '8px 16px', background: '#FDE047', border: '1px solid #14171B', borderRadius: 4, fontSize: 13, fontWeight: 700, whiteSpace: 'nowrap' }}>
-                  Rejoindre →
-                </div>
-              </button>
-            ))}
-
-            <div style={{ marginTop: 24, textAlign: 'center', fontSize: 12, color: 'rgba(20,23,27,0.5)' }}>
-              Vous ne voyez pas votre session ? <a href="/rejoindre" style={{ color: '#14171B', textDecoration: 'underline' }}>Entrez le code à 6 chiffres</a>
-            </div>
-          </div>
-        )}
+        <div style={{ marginTop:20, padding:16, background:'#FFF', border:'1px solid #eee', borderRadius:8, fontSize:12, opacity:0.7 }}>
+          <b>Flux production complet:</b><br/>
+          1. Super Admin crée FACI-001 dans facilitators<br/>
+          2. Facilitateur entre FACI-001 → crée SESS-XXX dans sessions<br/>
+          3. Joueur entre SESS-XXX → crée entrée dans session_players<br/>
+          4. Cartes jouées → session_depots + session_paris<br/>
+          5. Super Admin voit tout: COUNT sessions, joueurs, cartes
+        </div>
       </div>
     </div>
   );
