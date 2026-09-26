@@ -12,7 +12,9 @@ import dynamic from 'next/dynamic';
 import { PunctumBoard } from './PunctumBoard';
 import { CardVisual } from './CardVisual';
 import { ArgumentTimerFacilitator, ArgumentTimerPlayer } from './ArgumentTimer';
-const JitsiRoom = dynamic(() => import('./JitsiRoom').then((m) => m.JitsiRoom), {
+import { AudioPermission } from './AudioPermission';
+// Jitsi désactivé
+const _JitsiRoom_unused = dynamic(() => import('./JitsiRoom').then((m) => m.JitsiRoom), {
   ssr: false,
   loading: () => (
     <div
@@ -145,8 +147,13 @@ export function GameEngine({
 
   // Sync temps réel Supabase Realtime
   const sync = useSessionSync(sessionId, playerId, playerNick);
+  // Délai de grâce : empêche le polling d'écraser les changements locaux pendant 5s
+  const localUpdateRef = (typeof window !== 'undefined' && (window as any).__AM_GRACE__) || { until: 0 };
+  if (typeof window !== 'undefined') (window as any).__AM_GRACE__ = localUpdateRef;
+  const marquerChangementLocal = () => { localUpdateRef.until = Date.now() + 5000; };
 
   const changePhase = (newPhase: PhaseProtocole) => {
+    marquerChangementLocal();
     setPhase(newPhase);
     if (newPhase !== 'argumentation') {
       setArgumentationTerminee(false);
@@ -158,6 +165,7 @@ export function GameEngine({
   };
 
   const changeCardIdx = (newIdx: number) => {
+    marquerChangementLocal();
     setCardIdx(newIdx);
     if (role === 'facilitator') {
       try { sync.sendCarte(newIdx); } catch (e) { console.warn('[sync] sendCarte', e); }
@@ -589,7 +597,7 @@ function FacilitatorView({
 
         {/* Colonne droite : Jitsi + joueurs */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <JitsiRoom sessionId={sessionId} moderator height={280} />
+          <AudioPermission label="Visio facilitateur" />
           <JoueursList joueurs={joueurs} pions={pions} votes={votes} phase={phase} />
           <DureeControl dureeArgSec={dureeArgSec} setDureeArgSec={setDureeArgSec} />
         </div>
@@ -671,7 +679,7 @@ function PlayerView({
         {phase === 'decompte' && resultat && <ResultatPanel resultat={resultat} compact />}
 
         {/* Jitsi mini */}
-        <JitsiRoom sessionId={sessionId} displayName={playerNick} height={180} />
+        <AudioPermission label="Visio joueur" />
       </div>
     </div>
   );
