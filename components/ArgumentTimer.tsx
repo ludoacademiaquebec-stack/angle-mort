@@ -38,30 +38,18 @@ function useArgumentTimer(
       }
     }
 
-    // Fin totale
+    // Fin totale : stoppe juste le timer, ne fait rien d'autre
     if (elapsed >= dureeTotalSec) {
       setRunning(false);
-      onFin?.();
     }
   }, [elapsed, running, tempsParJoueur, joueurs.length, dureeTotalSec, indexEnCours, onFin]);
 
-  // Effet dédié : déclenche onFin une seule fois quand le timer s'arrête
-  const onFinCalledRef = useRef(false);
-  useEffect(() => {
-    if (!running && elapsed > 0 && onFinCalledRef.current === false) {
-      onFinCalledRef.current = true;
-      onFin?.();
-    }
-    if (running) {
-      onFinCalledRef.current = false;
-    }
-  }, [running, elapsed, onFin]);
+  // Désactivé : le facilitateur contrôle manuellement les phases
 
   const demarrer = () => {
     setElapsed(0);
     setIndexEnCours(0);
     setRunning(true);
-    onFinCalledRef.current = false;
   };
 
   const arreter = () => setRunning(false);
@@ -70,7 +58,7 @@ function useArgumentTimer(
     const nextIdx = indexEnCours + 1;
     if (nextIdx >= joueurs.length) {
       setRunning(false);
-      // onFin sera appelé via l'effet ci-dessous
+
       return;
     }
     setIndexEnCours(nextIdx);
