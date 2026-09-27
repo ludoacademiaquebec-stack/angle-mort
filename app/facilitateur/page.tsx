@@ -59,7 +59,7 @@ export default function FacilitateurPage() {
       <div style={{ minHeight: '100vh', background: '#FFFEF9', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
         <div style={{ maxWidth: 520, width: '100%', background: '#FDE047', border: '2px solid #14171B', borderRadius: 12, padding: 32, textAlign: 'center' }}>
           <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.6, letterSpacing: '0.1em' }}>SESSION CRÉÉE</div>
-          <div style={{ fontFamily: 'Georgia, serif', fontSize: 42, fontWeight: 800, margin: '16px 0 8px', letterSpacing: '0.1em', fontFamily: 'monospace' }}>
+          <div style={{ fontSize: 42, fontWeight: 800, margin: '16px 0 8px', letterSpacing: '0.1em', fontFamily: 'monospace' }}>
             {sessionCode}
           </div>
           <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 24 }}>
