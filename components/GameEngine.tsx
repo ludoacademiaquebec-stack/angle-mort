@@ -231,8 +231,8 @@ export function GameEngine({
           setCardIdx(data.cardIdx);
         }
 
-        // Pions
-        if (data.depots) {
+        // Pions — ne pas écraser si changement local récent
+        if (data.depots && Date.now() > localUpdateRef.until) {
           const pions: Pion[] = data.depots.map((d: any) => ({
             playerId: d.player_id,
             nick: data.players?.find((p: any) => p.id === d.player_id)?.nick || 'Anonyme',
@@ -333,8 +333,18 @@ export function GameEngine({
     try { sync.sendResultat(res); } catch (e) { console.warn('[sync] sendResultat', e); }
   };
 
-  const carteSuivante = () => {
+  const carteSuivante = async () => {
     const newIdx = (cardIdx + 1) % CARTES_DIAG.length;
+
+    // Supprimer les pions et paris en base pour cette carte
+    try {
+      const supabase = (await import('../lib/supabase')).getSupabaseBrowser();
+      await supabase.from('session_depots').delete().eq('session_id', sessionId);
+      await supabase.from('session_paris').delete().eq('session_id', sessionId);
+    } catch (e) {
+      console.warn('[carteSuivante] Erreur suppression:', e);
+    }
+
     changeCardIdx(newIdx);
     setPions([]);
     setVotes([]);
@@ -808,6 +818,9 @@ function VotePanel({ votes, joueurs, resultat }: any) {
 }
 
 function VotePlayer({ monVote, onVoter }: any) {
+  const voteReste = monVote?.choix === 'reste';
+  const voteBouge = monVote?.choix === 'bouge';
+
   return (
     <div
       style={{
@@ -837,32 +850,38 @@ function VotePlayer({ monVote, onVoter }: any) {
           onClick={() => onVoter('reste')}
           style={{
             padding: 14,
-            background: monVote?.choix === 'reste' ? '#FDE047' : '#FFFFFF',
-            border: '2px solid #14171B',
+            background: voteReste ? '#FDE047' : '#FFFFFF',
+            color: '#14171B',
+            border: voteReste ? '3px solid #14171B' : '2px solid rgba(20,23,27,0.3)',
             borderRadius: 6,
             fontSize: 14,
             fontWeight: 700,
             cursor: 'pointer',
           }}
         >
-          Reste
+          {voteReste ? '✓ Reste' : 'Reste'}
         </button>
         <button
           onClick={() => onVoter('bouge')}
           style={{
             padding: 14,
-            background: monVote?.choix === 'bouge' ? '#EF4444' : '#FFFFFF',
-            color: monVote?.choix === 'bouge' ? '#FFFFFF' : '#14171B',
-            border: '2px solid #14171B',
+            background: voteBouge ? '#EF4444' : '#FFFFFF',
+            color: voteBouge ? '#FFFFFF' : '#14171B',
+            border: voteBouge ? '3px solid #14171B' : '2px solid rgba(20,23,27,0.3)',
             borderRadius: 6,
             fontSize: 14,
             fontWeight: 700,
             cursor: 'pointer',
           }}
         >
-          Bouge
+          {voteBouge ? '✓ Bouge' : 'Bouge'}
         </button>
       </div>
+      {monVote && (
+        <div style={{ fontSize: 11, textAlign: 'center', color: 'rgba(20,23,27,0.6)', marginTop: 4 }}>
+          Votre vote : <strong>{monVote.choix}</strong>
+        </div>
+      )}
     </div>
   );
 }
