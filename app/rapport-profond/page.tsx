@@ -4,7 +4,8 @@ export const dynamic = 'force-dynamic';
 
 import { useEffect, useState, Suspense, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { supabase } from '@/lib/supabase';
+import { getSupabaseBrowser } from '@/lib/supabase';
+const supabase = getSupabaseBrowser();
 
 const QUADRANTS = ['JAUNE', 'VERT', 'ROUGE', 'BLEU'] as const;
 
