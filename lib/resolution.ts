@@ -11,15 +11,17 @@ export function positionMajoritaire(pions: Pion[], champ: 'quadrantInitial' | 'q
   return gagnant;
 }
 
-export function compterVotes(votes: Vote[]): { reste: number; bouge: number; majorite: 'reste' | 'bouge' | 'egalite' } {
-  let reste = 0; let bouge = 0;
-  for (const v of votes) { if (v.choix === 'reste') reste++; else if (v.choix === 'bouge') bouge++; }
-  let majorite: 'reste' | 'bouge' | 'egalite' = 'egalite';
-  if (reste > bouge) majorite = 'reste'; else if (bouge > reste) majorite = 'bouge';
-  return { reste, bouge, majorite };
+export function compterVotes(votes: Vote[]): { reste: number; bouge: number; neutre: number; majorite: 'reste' | 'bouge' | 'neutre' | 'egalite' } {
+  let reste = 0; let bouge = 0; let neutre = 0;
+  for (const v of votes) { if (v.choix === 'reste') reste++; else if (v.choix === 'bouge') bouge++; else if (v.choix === 'neutre') neutre++; }
+  let majorite: 'reste' | 'bouge' | 'neutre' | 'egalite' = 'egalite';
+  if (reste > bouge && reste > neutre) majorite = 'reste';
+  else if (bouge > reste && bouge > neutre) majorite = 'bouge';
+  else if (neutre > reste && neutre > bouge) majorite = 'neutre';
+  return { reste, bouge, neutre, majorite };
 }
 
-export function calculerCondition(positionSignal: Quadrant | null, positionFinale: Quadrant | null, majorite: 'reste' | 'bouge' | 'egalite'): ConditionResolution {
+export function calculerCondition(positionSignal: Quadrant | null, positionFinale: Quadrant | null, majorite: 'reste' | 'bouge' | 'neutre' | 'egalite'): ConditionResolution {
   if (!positionSignal ||!positionFinale) {
     if (majorite === 'reste') return 'coherence_confirmee';
     if (majorite === 'bouge') return 'revelation_confirmee';
@@ -49,13 +51,15 @@ export function attribuerRecompenses(pions: Pion[], gagnant: 'jaune' | 'rouge'):
 export function construireResultat(cardId: string, pions: Pion[], votes: Vote[]): ResultatCarte {
   const positionSignal = positionMajoritaire(pions, 'quadrantInitial');
   const positionFinale = positionMajoritaire(pions, 'quadrantActuel');
-  const { reste, bouge, majorite } = compterVotes(votes);
+  const { reste, bouge, neutre, majorite } = compterVotes(votes);
   let positionFinaleRetenue = positionFinale;
   if (majorite === 'reste') positionFinaleRetenue = positionSignal;
-  const condition = calculerCondition(positionSignal, positionFinaleRetenue, majorite);
+  let majoritePourCondition: 'reste' | 'bouge' | 'neutre' | 'egalite' = majorite;
+  if (majorite === 'neutre') majoritePourCondition = 'egalite';
+  const condition = calculerCondition(positionSignal, positionFinaleRetenue, majoritePourCondition);
   const gagnant = pariGagnant(condition);
   const { gagnants, perdants } = attribuerRecompenses(pions, gagnant);
-  return { cardId, positionSignal: positionSignal?? 'NO', positionFinale: positionFinaleRetenue?? 'NO', pariGagnant: gagnant, condition, gagnants, perdants, timestamp: Date.now(), reste, bouge, majorite };
+  return { cardId, positionSignal: positionSignal?? 'NO', positionFinale: positionFinaleRetenue?? 'NO', pariGagnant: gagnant, condition, gagnants, perdants, timestamp: Date.now(), reste, bouge, neutre, majorite } as ResultatCarte;
 }
 
 export const LIBELLE_CONDITION: Record<ConditionResolution, string> = {

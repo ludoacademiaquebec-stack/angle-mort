@@ -107,9 +107,9 @@ export interface ResultatCarte {
   perdants: string[];                 // playerIds
   timestamp: number;
  reste?: number;
- bouge?: number;
- neutre?: number;
- majorite?: 'reste' | 'bouge' | 'neutre' | 'neutre' | 'egalite';
+  bouge?: number;
+  neutre?: number;
+ majorite?: 'reste' | 'bouge' | 'neutre' | 'egalite';
 }
 
 // ---------- SESSION (état complet) ----------
