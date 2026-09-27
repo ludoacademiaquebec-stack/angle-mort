@@ -1,4 +1,5 @@
 'use client';
+import { supabase } from '@/lib/supabase';
 
 // ============================================================
 // ANGLE MORT v3.3 — Client API session
@@ -65,18 +66,16 @@ export async function savePion(sessionId: string, pion: Pion, cardId: string) {
 }
 
 // ----- Pari (vote final) -----
-export async function savePari(
-  sessionId: string,
-  playerId: string,
-  nick: string,
-  cardId: string,
-  pari: 'reste' | 'bouge' | 'neutre' | 'neutre'
-) {
-  return post(sessionId, {
-    action: 'upsert_pari',
-    playerId,
-    nick,
-    cardId,
-    pari,
-  });
+export async function savePari(sessionId: string, playerId: string, nick: string, cardId: string, choix: 'reste'|'bouge'|'neutre'){
+  try{
+    await supabase.from('session_events').insert({
+      session_id: sessionId,
+      type: 'pari',
+      to_quadrant: choix,
+      question_id: cardId,
+      player_id: playerId,
+      player_nick: nick,
+      metadata: { choix, cardId, question_id: cardId }
+    });
+  }catch(e){ console.error('savePari', e); }
 }
