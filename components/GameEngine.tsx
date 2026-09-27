@@ -11,7 +11,7 @@ type Phase = 'signal' | 'situation' | 'question' | 'argumentation' | 'vote' | 'd
 const QUADRANTS: Quadrant[] = ['NO','NE','SO','SE'];
 const LABELS: Record<Quadrant, string> = { NO: 'NO - Nord-Ouest', NE: 'NE - Nord-Est', SO: 'SO - Sud-Ouest', SE: 'SE - Sud-Est' };
 
-export default function GameEngine({ sessionId, code, isFacilitator = false, playerId, nick, sync }: any) {
+function GameEngine({ sessionId, code, isFacilitator = false, playerId, nick, sync }: any) {
   const [pions, setPions] = useState<Pion[]>([]);
   const [votes, setVotes] = useState<Vote[]>([]);
   const [cartesDiag, setCartesDiag] = useState<any[]>([]);
@@ -215,3 +215,7 @@ export default function GameEngine({ sessionId, code, isFacilitator = false, pla
     </div>
   )
 }
+
+
+export { GameEngine };
+export default GameEngine;
