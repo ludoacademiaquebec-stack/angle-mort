@@ -453,11 +453,27 @@ function VotePlayer({ monVote, onVoter }: any) {
 }
 
 function ResultatPanel({ resultat, compact }: { resultat: ResultatCarte; compact?: boolean }) {
+  const reste = (resultat as any).reste?? 0;
+  const bouge = (resultat as any).bouge?? 0;
+  const total = reste + bouge;
   return (
     <div style={{ padding: compact? 12 : 16, background: '#14171B', color: '#FBF8EF', borderRadius: 6 }}>
       <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, letterSpacing: '0.14em', textTransform: 'uppercase', opacity: 0.6 }}>Résultat • {resultat.cardId}</div>
       <div style={{ fontFamily: 'Georgia, serif', fontSize: 20, fontWeight: 700, marginTop: 6 }}>{LIBELLE_CONDITION[resultat.condition]}</div>
       <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>{DESCRIPTION_CONDITION[resultat.condition]}</div>
+      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+        <div style={{ flex: 1, background: '#FBF8EF', color: '#14171B', borderRadius: 4, padding: '8px 10px', textAlign: 'center' }}>
+          <div style={{ fontSize: 10, opacity: 0.6, textTransform: 'uppercase' }}>RESTE</div>
+          <div style={{ fontSize: 22, fontWeight: 800 }}>{reste}</div>
+          <div style={{ fontSize: 10 }}>{total? Math.round(reste/total*100) : 0}%</div>
+        </div>
+        <div style={{ flex: 1, background: '#D7302A', color: '#FBF8EF', borderRadius: 4, padding: '8px 10px', textAlign: 'center' }}>
+          <div style={{ fontSize: 10, opacity: 0.8, textTransform: 'uppercase' }}>BOUGE</div>
+          <div style={{ fontSize: 22, fontWeight: 800 }}>{bouge}</div>
+          <div style={{ fontSize: 10 }}>{total? Math.round(bouge/total*100) : 0}%</div>
+        </div>
+      </div>
+      <div style={{ marginTop: 10, fontSize: 11, opacity: 0.6 }}>Majorité: {(resultat as any).majorite} • Gagnant: {resultat.pariGagnant === 'jaune'? 'Jaune' : 'Rouge'} • {resultat.gagnants?.length || 0} gagnants</div>
     </div>
   );
 }
