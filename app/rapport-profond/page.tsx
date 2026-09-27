@@ -1,11 +1,11 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 
 const QUADRANTS = ['JAUNE','VERT','ROUGE','BLEU'] as const;
 
-export default function RapportProfond() {
+function RapportContent() {
   const searchParams = useSearchParams();
   const code = searchParams.get('code');
   const [data, setData] = useState<any>(null);
@@ -85,5 +85,13 @@ export default function RapportProfond() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function Page() {
+  return (
+    <Suspense fallback={<div style={{padding:40}}>Chargement rapport...</div>}>
+      <RapportContent />
+    </Suspense>
   );
 }
