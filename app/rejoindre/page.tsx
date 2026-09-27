@@ -24,7 +24,7 @@ export default function RejoindrePage() {
         setLoading(false);
         return;
       }
-      router.push(`/play/${data.sessionId}`);
+      router.push(`/joueur/${data.sessionId}`);
     } catch (e) {
       setError('Erreur de connexion');
       setLoading(false);
