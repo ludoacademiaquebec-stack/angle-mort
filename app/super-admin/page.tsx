@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
 import { getCartesDiag, getCartesAll } from '@/lib/cards';
@@ -8,6 +8,30 @@ const CARTES_ALL_STATIC = getCartesAll();
 type Faci = { id: string; code: string; name: string; email: string | null; active: boolean; created_at: string; last_login_at: string | null; };
 type Session = { id: string; code: string; company: string | null; facilitator_id: string | null; phase: string; status: string; started_at: string; };
 const FAMILLES = ['REC','MIC','PRI','CLI'] as const;
+
+const getRapportLink = (id: string) => `/rapport-profond?sessionId=${id}`;
+
+
+function SessionsRapportList(){
+  const [sessions, setSessions] = React.useState<any[]>([]);
+  React.useEffect(()=>{
+    const { supabase } = require('@/lib/supabase');
+    supabase.from('sessions').select('id, code, company, created_at').order('created_at', {ascending:false}).limit(20).then((r:any)=> setSessions(r.data||[]));
+  },[]);
+  return (
+    <div style={{ display:'grid', gap:8 }}>
+      {sessions.map((sess:any)=>(
+        <div key={sess.id} style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'10px 12px', border:'1px solid #eee', borderRadius:8 }}>
+          <div><div style={{fontSize:12, fontWeight:700, fontFamily:'monospace'}}>{sess.code} • {sess.company||'—'}</div><div style={{fontSize:10, opacity:0.6}}>{sess.id.slice(0,8)} • {new Date(sess.created_at).toLocaleDateString()}</div></div>
+          <a href={`/rapport-profond?sessionId=${sess.id}`} style={{ padding:'8px 14px', background:'#14171B', color:'#FFF', borderRadius:6, fontSize:12, fontWeight:700, textDecoration:'none' }}>Rapport 3 couleurs</a>
+        </div>
+      ))}
+      {sessions.length===0 && <div style={{fontSize:12, opacity:0.6}}>Aucune session</div>}
+    </div>
+  )
+}
+
+
 export default function SuperAdminPage() {
   const [auth, setAuth] = useState(false);
   const [code, setCode] = useState('');
@@ -64,6 +88,12 @@ export default function SuperAdminPage() {
           </div>
           <div style={{ background:'#FFF', border:'1px solid #14171B', borderRadius:12, padding:20 }}>{!selected? <div>Selectionne une carte</div> : (<div><h2>{selected.id} — {selected.titre}</h2><button onClick={saveCard} disabled={saving} style={{ padding:'10px 18px', background:'#14171B', color:'#FFF', borderRadius:6, marginTop:12 }}>{saving? 'Sauvegarde...' : 'Sauvegarder en prod'}</button></div>)}</div>
         </div>
+
+      <div style={{ marginTop:30, background:'#FFF', border:'1px solid #14171B', borderRadius:12, padding:20 }}>
+        <h3 style={{ fontFamily:'Georgia, serif', marginBottom:12 }}>Sessions → Rapports profonds (avec neutre)</h3>
+        <SessionsRapportList />
+      </div>
+
       </div>
     </div>
   );
