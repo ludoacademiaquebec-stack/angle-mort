@@ -7,3 +7,5 @@ node_modules
 dist
 build
 tsconfig.tsbuildinfo
+_routes_de_sauvegarde/
+_backup_routes/
