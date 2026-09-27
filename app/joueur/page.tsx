@@ -8,7 +8,7 @@ export default function JoueurPage() {
   const [sessionCode, setSessionCode] = useState('');
   const [pseudo, setPseudo] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
+  const [error, setError] = useState<string | null>(null);
   const router = useRouter();
 
   const rejoindre = async () => {
@@ -23,22 +23,44 @@ export default function JoueurPage() {
     const { data, error: err } = await supabase
       .from('sessions')
       .select('id, code, status')
-      .or('code.eq.' + code + ',id.eq.' + code)
+      .or(`code.eq.${code},id.eq.${code}`)
       .eq('status', 'active')
       .single();
 
     if (err || !data) {
-      setError('Session introuvable ou inactive.');
+      setError(`Session ${code} introuvable ou inactive. Vérifie avec facilitateur.`);
       setLoading(false);
       return;
     }
 
+    // 1. Crée le joueur dans session_players (pour que le facilitateur le voie)
+    const playerId = crypto.randomUUID();
+    const { error: insertErr } = await supabase
+      .from('session_players')
+      .upsert({
+        id: playerId,
+        session_id: data.id, // ton schéma: session_id = text (ex: SESS-IBEZ9K)
+        nick: pseudo.trim(),
+        points: 0,
+        jetons: [],
+        current_quadrant: null,
+      }, { onConflict: 'session_id,nick' });
+
+    if (insertErr && !insertErr.message.includes('duplicate')) {
+      setError(insertErr.message);
+      setLoading(false);
+      return;
+    }
+
+    // 2. Sauve en local pour retrouver son id
+    const finalPlayerId = playerId;
     localStorage.setItem('anglemort-' + data.id, JSON.stringify({
-      playerId: crypto.randomUUID(),
+      playerId: finalPlayerId,
       nick: pseudo.trim(),
     }));
 
-    router.push('/joueur/' + data.id);
+    // 3. Redirige vers LA VUE JOUEUR, pas vers board facilitateur
+    router.push('/joueur/' + data.id + '?pseudo=' + encodeURIComponent(pseudo.trim()));
   };
 
   return (
@@ -51,14 +73,14 @@ export default function JoueurPage() {
           Rejoindre une session
         </h1>
         <p style={{ fontSize: 14, color: 'rgba(20,23,27,0.6)', marginBottom: 24 }}>
-          Entrez le code à 6 caractères fourni par votre facilitateur
+          Code fourni par votre facilitateur (ex: SESS-IBEZ9K)
         </p>
 
         <label style={{ fontSize: 12, color: 'rgba(20,23,27,0.6)', display: 'block', marginBottom: 6 }}>Code session</label>
         <input
           value={sessionCode}
           onChange={(e) => setSessionCode(e.target.value.toUpperCase())}
-          placeholder="A3KM9P"
+          placeholder="SESS-IBEZ9K"
           style={{ width: '100%', padding: 14, marginBottom: 16, border: '2px solid #14171B', borderRadius: 6, fontWeight: 700, fontFamily: 'monospace', letterSpacing: '0.15em', textAlign: 'center', boxSizing: 'border-box' }}
         />
 
@@ -77,8 +99,12 @@ export default function JoueurPage() {
           disabled={loading}
           style={{ width: '100%', padding: 16, background: '#14171B', color: '#FBF8EF', border: 'none', borderRadius: 6, fontWeight: 700, fontSize: 15, cursor: loading ? 'wait' : 'pointer' }}
         >
-          {loading ? 'Connexion...' : 'Rejoindre'}
+          {loading ? 'Connexion...' : 'Rejoindre →'}
         </button>
+
+        <div style={{ fontSize: 11, opacity: 0.5, marginTop: 12, textAlign: 'center' }}>
+          Vérifie: sessions.code EXISTS + status=active → INSERT session_players
+        </div>
       </div>
     </div>
   );
