@@ -1,528 +1,217 @@
 'use client';
+import { useState, useEffect, useMemo } from 'react';
+import { supabase } from '@/lib/supabase';
+import { loadCardsDiagFromDB, loadCardsAllFromDB } from '@/lib/cards';
+import { compterVotes, construireResultat, positionMajoritaire } from '@/lib/resolution';
+import { savePari } from '@/lib/session-api';
+import type { Quadrant, Pion, Vote, ResultatCarte } from '@/lib/types';
 
-// ============================================================
-// ANGLE MORT v3.4.1 — GameEngine FINAL BUILD OK
-// v3.3 + analytics arrière-plan session_events SANS RIEN CASSER
-// + cartes depuis Supabase cards_diag + signal_cards fallback
-// + vote 3 boutons RESTE / BOUGE / NEUTRE
-// ============================================================
+type Phase = 'signal' | 'situation' | 'question' | 'argumentation' | 'vote' | 'decompte' | 'resultat' | 'fermeture_all' | 'fermeture';
 
-import { useState, useMemo, useEffect, useRef } from 'react';
-import dynamic from 'next/dynamic';
-import { PunctumBoard } from './PunctumBoard';
-import { CardVisual } from './CardVisual';
-import { ArgumentTimerFacilitator, ArgumentTimerPlayer } from './ArgumentTimer';
-import { AudioPermission } from './AudioPermission';
+const QUADRANTS: Quadrant[] = ['NO','NE','SO','SE'];
+const LABELS: Record<Quadrant, string> = { NO: 'NO - Nord-Ouest', NE: 'NE - Nord-Est', SO: 'SO - Sud-Ouest', SE: 'SE - Sud-Est' };
 
-const _JitsiRoom_unused = dynamic(() => import('./JitsiRoom').then((m) => m.JitsiRoom), { ssr: false });
-
-import { CARTES_DIAG as CARTES_DIAG_STATIC, loadCardsDiagFromDB, loadCardsAllFromDB } from '../lib/cards';
-import {
-  construireResultat,
-  LIBELLE_CONDITION,
-  DESCRIPTION_CONDITION,
-} from '../lib/resolution';
-import type {
-  Pion,
-  Vote,
-  Quadrant,
-  PhaseProtocole,
-  Joueur,
-  ResultatCarte,
-} from '../lib/types';
-import { useSessionSync } from '../lib/useSessionSync';
-import { loadSession, saveSession, savePion, savePlayer, savePari } from '../lib/session-api';
-
-type Role = 'facilitator' | 'player';
-
-const PHASES_ORDER: PhaseProtocole[] = [
-  'cadrage',
-  'signal',
-  'situation',
-  'argumentation',
-  'vote',
-  'decompte',
-  'fermeture_all',
-];
-
-const PHASE_LABEL: Record<PhaseProtocole, string> = {
-  cadrage: 'Cadrage',
-  signal: 'Signal',
-  situation: 'Situation',
-  argumentation: 'Argumentation',
-  vote: 'Vote',
-  decompte: 'Décompte',
-  fermeture_all: 'Fermeture ALL',
-};
-
-export function GameEngine({
-  sessionId,
-  role,
-  playerId,
-  playerNick,
-  joueurs = [],
-}: {
-  sessionId: string;
-  role: Role;
-  playerId?: string;
-  playerNick?: string;
-  joueurs?: Joueur[];
-}) {
-  const [phase, setPhase] = useState<PhaseProtocole>('cadrage');
-  const [cardIdx, setCardIdx] = useState(0);
+export default function GameEngine({ sessionId, code, isFacilitator = false, playerId, nick, sync }: any) {
   const [pions, setPions] = useState<Pion[]>([]);
   const [votes, setVotes] = useState<Vote[]>([]);
+  const [cartesDiag, setCartesDiag] = useState<any[]>([]);
+  const [cartesAll, setCartesAll] = useState<any[]>([]);
+  const [cardIdx, setCardIdx] = useState(0);
+  const [phase, setPhase] = useState<Phase>('signal');
   const [resultat, setResultat] = useState<ResultatCarte | null>(null);
-  const [dureeArgSec, setDureeArgSec] = useState(300);
-  const [argumentationTerminee, setArgumentationTerminee] = useState(false);
-  const [cartesDiag, setCartesDiag] = useState(CARTES_DIAG_STATIC);
+  const [allTirees, setAllTirees] = useState<any[]>([]);
+  const [timer, setTimer] = useState(300);
 
-  const cardShownAtRef = useRef<number>(Date.now());
-  const lastMoverRef = useRef<string | null>(null);
+  const carte = cartesDiag[cardIdx];
 
-  const logEvent = async (evt: any) => {
-    try {
-      const { getSupabaseBrowser } = await import('../lib/supabase');
-      const supabase = getSupabaseBrowser();
-      await supabase.from('session_events').insert({
-        session_id: sessionId,
-        player_id: playerId || null,
-        nick: playerNick || (role === 'facilitator'? 'FACILITATEUR' : null),
-        latency_ms: evt.latency_ms?? Date.now() - cardShownAtRef.current,
-      ...evt,
-      });
-    } catch {}
-  };
+  useEffect(()=>{
+    loadCardsDiagFromDB().then(setCartesDiag);
+    loadCardsAllFromDB().then(setCartesAll);
+  },[]);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const dbDiag = await loadCardsDiagFromDB();
-        if (!cancelled && dbDiag && dbDiag.length > 0) setCartesDiag(dbDiag);
-        await loadCardsAllFromDB();
-      } catch {}
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const data = await loadSession(sessionId);
-      if (cancelled ||!data || data.empty) return;
-      if (data.phase) setPhase(data.phase);
-      if (typeof data.cardIdx === 'number' && data.cardIdx >= 0) setCardIdx(data.cardIdx);
-      if (data.depots && data.depots.length > 0) {
-        const pions: Pion[] = data.depots.map((d: any) => ({
-          playerId: d.player_id,
-          nick: data.players?.find((p: any) => p.id === d.player_id)?.nick || 'Anonyme',
-          quadrantInitial: d.quadrant,
-          quadrantActuel: d.quadrant,
-          couleur: d.canal === 'situation'? 'rouge' : d.slot === 1? 'rouge' : 'jaune',
-        }));
-        setPions(pions);
-      }
-      if (data.paris && data.paris.length > 0) {
-        const votes: Vote[] = data.paris.map((p: any) => ({
-          playerId: p.player_id,
-          nick: data.players?.find((pp: any) => pp.id === p.player_id)?.nick || 'Anonyme',
-          choix: p.pari,
-          timestamp: new Date(p.created_at).getTime(),
-        }));
-        setVotes(votes);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [sessionId]);
-
-  useEffect(() => {
-    if (role === 'player' && playerId && playerNick) {
-      savePlayer(sessionId, playerId, playerNick);
-    }
-  }, [role, playerId, playerNick, sessionId]);
-
-  const sync = useSessionSync(sessionId, playerId, playerNick);
-  const localUpdateRef = (typeof window!== 'undefined' && (window as any).__AM_GRACE__) || { until: 0 };
-  if (typeof window!== 'undefined') (window as any).__AM_GRACE__ = localUpdateRef;
-  const marquerChangementLocal = () => { localUpdateRef.until = Date.now() + 5000; };
-
-  const changePhase = (newPhase: PhaseProtocole) => {
-    marquerChangementLocal();
-    setPhase(newPhase);
-    if (newPhase!== 'argumentation') setArgumentationTerminee(false);
-    if (role === 'facilitator') {
-      try { sync.sendPhase(newPhase); } catch {}
-      try { saveSession(sessionId, { phase: newPhase, cardIdx }); } catch {}
-      logEvent({ type: 'phase_change', from_quadrant: phase, to_quadrant: newPhase, question_id: cartesDiag[cardIdx]?.id });
-    }
-  };
-
-  const changeCardIdx = (newIdx: number) => {
-    marquerChangementLocal();
-    setCardIdx(newIdx);
-    cardShownAtRef.current = Date.now();
-    lastMoverRef.current = null;
-    if (role === 'facilitator') {
-      try { sync.sendCarte(newIdx); } catch {}
-      try { saveSession(sessionId, { cardIdx: newIdx }); } catch {}
-    }
-    logEvent({ type: 'card_shown', question_id: cartesDiag[newIdx]?.id, metadata: { famille: cartesDiag[newIdx]?.famille } });
-  };
-
-  useEffect(() => {
-    if (role === 'player' && sync.remotePhase && sync.remotePhase!== phase) {
-      setPhase(sync.remotePhase as PhaseProtocole);
-    }
-  }, [role, sync.remotePhase, phase]);
-
-  useEffect(() => {
-    if (role === 'player' && sync.remoteCardIdx!== null && sync.remoteCardIdx!== cardIdx) {
-      setCardIdx(sync.remoteCardIdx);
-      cardShownAtRef.current = Date.now();
-    }
-  }, [role, sync.remoteCardIdx, cardIdx]);
-
-  useEffect(() => {
-    if (role!== 'facilitator') return;
-    const remote = Object.values(sync.remotePlayers);
-    if (remote.length === 0) return;
-    setPions((prev) => {
-      const map = new Map(prev.map((p) => [p.playerId, p]));
-      for (const rp of remote) {
-        if (rp.pion) map.set(rp.pion.playerId, rp.pion);
-      }
-      return Array.from(map.values());
-    });
-    setVotes((prev) => {
-      const map = new Map(prev.map((v) => [v.playerId, v]));
-      for (const rp of remote) {
-        if (rp.vote) map.set(rp.vote.playerId, rp.vote);
-      }
-      return Array.from(map.values());
-    });
-  }, [role, sync.remotePlayers]);
-
-  useEffect(() => {
-    if (role === 'player' && sync.remoteResultat) {
-      setResultat(sync.remoteResultat);
-    }
-  }, [role, sync.remoteResultat]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      if (cancelled) return;
-      try {
-        const data = await loadSession(sessionId);
-        if (cancelled ||!data || data.empty) return;
-        if (data.phase && data.phase!== phase) setPhase(data.phase);
-        if (typeof data.cardIdx === 'number' && data.cardIdx >= 0 && data.cardIdx!== cardIdx) setCardIdx(data.cardIdx);
-        if (data.depots && Date.now() > localUpdateRef.until) {
-          const pions: Pion[] = data.depots.map((d: any) => ({
-            playerId: d.player_id,
-            nick: data.players?.find((p: any) => p.id === d.player_id)?.nick || 'Anonyme',
-            quadrantInitial: d.quadrant,
-            quadrantActuel: d.quadrant,
-            couleur: d.canal === 'situation'? 'rouge' : d.slot === 1? 'rouge' : 'jaune',
-          }));
-          setPions(pions);
-        }
-        if (data.paris) {
-          const votes: Vote[] = data.paris.map((p: any) => ({
-            playerId: p.player_id,
-            nick: data.players?.find((pp: any) => pp.id === p.player_id)?.nick || 'Anonyme',
-            choix: p.pari,
-            timestamp: new Date(p.created_at).getTime(),
-          }));
-          setVotes(votes);
-        }
-      } catch {}
+  useEffect(()=>{
+    if(!sessionId) return;
+    const fetchPions = async ()=>{
+      const { data } = await supabase.from('session_pions').select('*').eq('session_id', sessionId);
+      if(data) setPions(data as any);
     };
-    poll();
-    const iv = setInterval(poll, 2000);
-    return () => { cancelled = true; clearInterval(iv); };
-  }, [sessionId]);
+    const fetchVotes = async ()=>{
+      const { data } = await supabase.from('session_events').select('*').eq('session_id', sessionId).eq('type','pari');
+      if(data){
+        const v: Vote[] = data.map((e:any)=>({ playerId: e.player_id, choix: e.to_quadrant, cardId: e.question_id, timestamp: new Date(e.created_at).getTime() }));
+        setVotes(v);
+      }
+    };
+    fetchPions(); fetchVotes();
+    const ch = supabase.channel(`session-${sessionId}`)
+     .on('postgres_changes', { event:'*', schema:'public', table:'session_pions', filter:`session_id=eq.${sessionId}` }, fetchPions)
+     .on('postgres_changes', { event:'*', schema:'public', table:'session_events', filter:`session_id=eq.${sessionId}` }, fetchVotes)
+     .subscribe();
+    return ()=>{ supabase.removeChannel(ch); };
+  },[sessionId]);
 
-  const carte = useMemo(() => cartesDiag[cardIdx] || CARTES_DIAG_STATIC[cardIdx], [cartesDiag, cardIdx]);
+  useEffect(()=>{
+    if(phase!=='argumentation') return;
+    const id = setInterval(()=> setTimer(t=> Math.max(0, t-1)), 1000);
+    return ()=> clearInterval(id);
+  },[phase]);
 
-  const monPion = useMemo(() => {
-    if (!playerId) return null;
-    return pions.find((p) => p.playerId === playerId) || null;
-  }, [pions, playerId]);
+  const counts = useMemo(()=> compterVotes(votes.filter(v=> v.cardId===carte?.id)), [votes, carte]);
 
-  const deplacerPion = (pid: string, nick: string, q: Quadrant) => {
-    const existing = pions.find((p) => p.playerId === pid);
-    const prevQ = existing?.quadrantActuel || null;
-    const isFirst = pions.length === 0;
-    const followedNick = lastMoverRef.current && lastMoverRef.current!== pid? pions.find(p => p.playerId === lastMoverRef.current)?.nick || null : null;
-
-    let updated: Pion;
-    if (existing) {
-      const couleur = existing.quadrantInitial && existing.quadrantInitial!== q? 'rouge' : existing.couleur === 'neutre'? 'neutre' : existing.couleur;
-      updated = {...existing, quadrantActuel: q, couleur };
-      setPions((prev) => prev.map((p) => (p.playerId === pid? updated : p)));
-    } else {
-      updated = { playerId: pid, nick, quadrantInitial: q, quadrantActuel: q, couleur: 'neutre' };
-      setPions((prev) => [...prev, updated]);
-    }
-    lastMoverRef.current = pid;
-
-    if (pid === playerId) {
-      try { sync.sendPion(updated); } catch {}
-      savePion(sessionId, updated, carte.id).catch(() => {});
-      logEvent({
-        type: prevQ? 'change_quadrant' : 'move',
-        from_quadrant: prevQ,
-        to_quadrant: q,
-        question_id: carte.id,
-        latency_ms: Date.now() - cardShownAtRef.current,
-        metadata: { is_first: isFirst, followed_nick: followedNick, followed_someone:!!followedNick, hesitation:!!prevQ && prevQ!== q },
-      });
-    }
+  const logEvent = async (payload:any)=>{
+    try{ await supabase.from('session_events').insert({ session_id: sessionId, type: payload.type, to_quadrant: payload.to_quadrant, question_id: payload.question_id, player_id: playerId||null, metadata: payload.metadata||{} }); }catch{}
   };
 
-  const verrouillerPions = () => {
-    setPions((prev) => prev.map((p) => ({...p, couleur: p.couleur === 'neutre'? 'jaune' : p.couleur })));
-    logEvent({ type: 'lock_pions', question_id: carte.id, metadata: { pions_count: pions.length } });
+  const handleVote = async (choix: 'reste' | 'bouge' | 'neutre')=>{
+    if(!carte) return;
+    const pid = playerId || 'anon';
+    const newVote: Vote = { playerId: pid, choix, cardId: carte.id, timestamp: Date.now() };
+    setVotes(prev=> [...prev.filter(v=>!(v.playerId===pid && v.cardId===carte.id)), newVote]);
+    try{ sync?.sendVote?.(newVote); }catch{}
+    try{ await savePari(sessionId, pid, nick||'Joueur', carte.id, choix); }catch{}
+    await logEvent({ type:'pari', to_quadrant: choix, question_id: carte.id, metadata:{ choix, mon_quadrant: pions.find(p=>p.playerId===pid)?.quadrantActuel } });
   };
 
-  const voter = (pid: string, nick: string, choix: 'reste' | 'bouge' | 'neutre') => {
-    const newVote: Vote = { playerId: pid, nick, choix, timestamp: Date.now() };
-    setVotes((prev) => [...prev.filter((v) => v.playerId!== pid), newVote]);
-    if (pid === playerId) {
-      try { sync.sendVote(newVote); } catch {}
-      try { savePari(sessionId, pid, nick, carte.id, choix); } catch {}
-      logEvent({ type: 'pari', to_quadrant: choix, question_id: carte.id, metadata: { choix, mon_quadrant: monPion?.quadrantActuel } });
-    }
-  };
-
-  const monVote = useMemo(() => (playerId? votes.find((v) => v.playerId === playerId) || null : null), [votes, playerId]);
-
-  const lancerDecompte = () => {
-    const res = construireResultat(carte.id, pions, votes);
+  const handleDecompte = ()=>{
+    if(!carte) return;
+    const res = construireResultat(carte.id, pions, votes.filter(v=> v.cardId===carte.id));
     setResultat(res);
-    changePhase('decompte');
-    try { sync.sendResultat(res); } catch {}
-    logEvent({ type: 'decompte', question_id: carte.id, metadata: { resultat: res } });
+    setPhase('resultat');
+    logEvent({ type:'resultat', question_id: carte.id, metadata: res });
+    supabase.from('session_resultats').insert({ session_id: sessionId, card_id: carte.id, card_index: cardIdx, position_signal: res.positionSignal, position_finale: res.positionFinale, pari_gagnant: res.pariGagnant, condition: res.condition, reste: res.reste, bouge: res.bouge, neutre: (res as any).neutre, majorite: res.majorite, gagnants: res.gagnants, perdants: res.perdants }).then(()=>{});
   };
 
-  const carteSuivante = async () => {
-    const newIdx = (cardIdx + 1) % cartesDiag.length;
-    try {
-      const supabase = (await import('../lib/supabase')).getSupabaseBrowser();
-      await supabase.from('session_depots').delete().eq('session_id', sessionId);
-      await supabase.from('session_paris').delete().eq('session_id', sessionId);
-    } catch (e) {
-      console.warn('[carteSuivante] Erreur suppression:', e);
-    }
-    logEvent({ type: 'card_next', question_id: carte.id, metadata: { from: carte.id, to: cartesDiag[newIdx].id } });
-    changeCardIdx(newIdx);
-    setPions([]);
-    setVotes([]);
-    setResultat(null);
-    changePhase('signal');
+  const tirerAll = ()=>{
+    const n1 = cartesAll.filter(c=>c.niveau===1);
+    const n2 = cartesAll.filter(c=>c.niveau===2);
+    const n3 = cartesAll.filter(c=>c.niveau===3);
+    const pick = (arr:any[])=> arr.length? arr[Math.floor(Math.random()*arr.length)] : null;
+    const tirees = [pick(n1), pick(n2), pick(n3)].filter(Boolean);
+    setAllTirees(tirees);
+    setPhase('fermeture_all');
+    logEvent({ type:'phase', to_quadrant: 'fermeture_all' as any, metadata:{ all: tirees.map((c:any)=>c.id) } });
   };
 
-  if (role === 'player' && playerId && playerNick) {
-    return (
-      <PlayerView sessionId={sessionId} cardIdx={cardIdx} phase={phase} carte={carte} pions={pions} monPion={monPion} playerId={playerId} playerNick={playerNick} joueurs={joueurs} onDeplacer={(q) => deplacerPion(playerId, playerNick, q)} onVoter={(choix) => voter(playerId, playerNick, choix)} monVote={monVote} resultat={resultat} dureeArgSec={dureeArgSec} />
-    );
+  if(!carte){
+    return <div style={{ padding:40, background:'#FFFEF9', minHeight:'100vh' }}>Chargement cartes... {cartesDiag.length} diag / {cartesAll.length} ALL</div>;
   }
 
-  return (
-    <FacilitatorView sessionId={sessionId} cardIdx={cardIdx} phase={phase} carte={carte} cartesDiag={cartesDiag} pions={pions} votes={votes} joueurs={joueurs} resultat={resultat} dureeArgSec={dureeArgSec} setDureeArgSec={setDureeArgSec} argumentationTerminee={argumentationTerminee} setArgumentationTerminee={setArgumentationTerminee} onDeplacer={deplacerPion} onVerrouillerPions={verrouillerPions} onLancerDecompte={lancerDecompte} onCarteSuivante={carteSuivante} onSetPhase={changePhase} onSetCardIdx={changeCardIdx} />
-  );
-}
+  const posSig = positionMajoritaire(pions, 'quadrantInitial');
+  const posFin = positionMajoritaire(pions, 'quadrantActuel');
 
-function FacilitatorView({ sessionId, cardIdx, phase, carte, cartesDiag, pions, votes, joueurs, resultat, dureeArgSec, setDureeArgSec, argumentationTerminee, setArgumentationTerminee, onVerrouillerPions, onLancerDecompte, onCarteSuivante, onSetPhase, onSetCardIdx }: any) {
-  const indexPhase = PHASES_ORDER.indexOf(phase);
   return (
-    <div style={{ minHeight: '100vh', background: '#F4EFE2', padding: 20 }}>
-      <div style={{ maxWidth: 1400, margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 20px', background: '#14171B', color: '#FBF8EF', borderRadius: 6 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-          <span style={{ fontFamily: 'Georgia, serif', fontWeight: 700, fontSize: 16 }}>Angle Mort</span>
-          <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11, letterSpacing: '0.1em', opacity: 0.7 }}>{sessionId} • {joueurs.length} joueurs • {carte?.id}</span>
-          <a href={`/rapport/${sessionId}`} target="_blank" style={{ fontSize: 10, background: '#FDE047', color: '#14171B', padding: '4px 8px', borderRadius: 3, textDecoration: 'none', fontWeight: 700 }}>RAPPORT PROFOND →</a>
+    <div style={{ minHeight:'100vh', background:'#FFFEF9', color:'#14171B', padding:16 }}>
+      <div style={{ maxWidth:1300, margin:'0 auto' }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12, background:'#FFF', border:'1px solid #14171B', borderRadius:8, padding:'10px 16px' }}>
+          <div style={{ fontWeight:800, fontFamily:'Georgia, serif' }}>{code} • Carte {cardIdx+1}/{cartesDiag.length} • {carte.id} — {carte.famille}</div>
+          <div style={{ display:'flex', gap:12, alignItems:'center', fontSize:12 }}>
+            <span>Phase: <b>{phase}</b></span>
+            <span>Signal: <b>{posSig||'—'}</b> → Finale: <b>{posFin||'—'}</b></span>
+            <span style={{ padding:'4px 10px', borderRadius:20, background:'#14171B', color:'#FFF' }}>R:{counts.reste} B:{counts.bouge} N:{counts.neutre} → {counts.majorite} • {votes.filter(v=>v.cardId===carte.id).length} votes</span>
+          </div>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          {PHASES_ORDER.slice(0, 6).map((p, i) => (
-            <div key={p} style={{ padding: '4px 10px', borderRadius: 3, fontSize: 10, fontFamily: 'ui-monospace, monospace', letterSpacing: '0.1em', background: i === indexPhase? '#FDE047' : 'rgba(255,255,255,0.08)', color: i === indexPhase? '#14171B' : '#FBF8EF', fontWeight: i === indexPhase? 700 : 400 }}>
-              {i + 1}. {PHASE_LABEL[p]}
+
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 340px', gap:16 }}>
+          <div>
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gridTemplateRows:'1fr 1fr', gap:8, height:520, marginBottom:12 }}>
+              {QUADRANTS.map(q=>(
+                <div key={q} style={{ border:`2px solid ${posSig===q? '#FDE047':'#14171B'}`, background: posFin===q? '#f9fafb':'#FFF', borderRadius:10, padding:10, position:'relative' }}>
+                  <div style={{ fontSize:11, fontWeight:800, opacity:0.6 }}>{LABELS[q]} {posSig===q?'• SIGNAL':''} {posFin===q?'• FINALE':''}</div>
+                  <div style={{ marginTop:8, display:'flex', flexWrap:'wrap', gap:6 }}>
+                    {pions.filter(p=> (phase==='signal'? p.quadrantInitial : p.quadrantActuel)===q).map(p=>(
+                      <div key={p.playerId} style={{ width:28, height:28, borderRadius:14, background: p.couleur==='jaune'? '#FDE047' : p.couleur==='rouge'? '#EF4444':'#E5E7EB', border:'1px solid #14171B', display:'flex', alignItems:'center', justifyContent:'center', fontSize:10, fontWeight:800 }}>{p.playerId.slice(0,2).toUpperCase()}</div>
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-      </div>
 
-      <div style={{ maxWidth: 1400, margin: '0 auto', display: 'grid', gridTemplateColumns: '340px 1fr 320px', gap: 16 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {carte && <CardVisual card={carte} face={phase === 'signal' || phase === 'cadrage'? 'signal' : 'situation'} size="xs" />}
-          <ControlsFacilitator phase={phase} onSetPhase={onSetPhase} onVerrouiller={onVerrouillerPions} onLancerDecompte={onLancerDecompte} onCarteSuivante={onCarteSuivante} cardIdx={cardIdx} onSetCardIdx={onSetCardIdx} cartesCount={cartesDiag.length} />
-        </div>
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {phase === 'argumentation' && (
-            <button onClick={() => onSetPhase('vote')} style={{ padding: '10px 16px', fontSize: 13, fontWeight: 700, background: argumentationTerminee? '#14171B' : '#FDE047', color: argumentationTerminee? '#FBF8EF' : '#14171B', border: '1px solid #14171B', borderRadius: 4, cursor: 'pointer', textAlign: 'center' }}>
-              {argumentationTerminee? '✓ Argumentation terminée — Passer au vote' : '⏱ Argumentation en cours — Cliquer pour passer au vote maintenant'}
-            </button>
-          )}
-          <div style={{ display: 'flex', gap: 8, padding: 12, background: '#FBF8EF', borderRadius: 6, border: '1px solid rgba(20,23,27,0.15)', flexWrap: 'wrap', alignItems: 'center' }}>
-            <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.5, marginRight: 8 }}>Phase :</span>
-            {['signal', 'situation', 'argumentation', 'vote', 'decompte'].map((p) => (
-              <button key={p} onClick={() => onSetPhase(p)} style={{ padding: '6px 12px', fontSize: 11, fontWeight: 600, border: phase === p? '2px solid #14171B' : '1px solid rgba(20,23,27,0.2)', background: phase === p? '#FDE047' : '#FFFFFF', color: '#14171B', borderRadius: 4, cursor: 'pointer', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{p}</button>
-            ))}
-            <span style={{ marginLeft: 'auto', fontSize: 11, opacity: 0.5 }}>→ {joueurs.length} joueurs</span>
+            <div style={{ background:'#FFF', border:'1px solid #14171B', borderRadius:12, padding:16 }}>
+              {phase==='signal' && (<><div style={{ fontSize:11, opacity:0.6 }}>SIGNAL</div><h2 style={{ fontFamily:'Georgia, serif', fontSize:20 }}>{carte.signal}</h2><div style={{ marginTop:8 }}>{carte.situation}</div><button onClick={()=>setPhase('question')} style={{ marginTop:16, padding:'10px 20px', background:'#14171B', color:'#FFF', borderRadius:6 }}>Passer à la question</button></>)}
+              {phase==='question' && (<><h2 style={{ fontFamily:'Georgia, serif', fontSize:20 }}>{carte.question}</h2><div style={{ marginTop:8, fontSize:13, opacity:0.7 }}>Mot piège: {carte.motPiege||'—'} • Compteur: {carte.compteur||''} {carte.compteurLabel||''}</div><button onClick={()=>{ setPhase('argumentation'); setTimer(300); }} style={{ marginTop:16, padding:'10px 20px', background:'#14171B', color:'#FFF', borderRadius:6 }}>Lancer argumentation 5min</button></>)}
+              {phase==='argumentation' && (<><div style={{ display:'flex', justifyContent:'space-between' }}><h2>Argumentation</h2><div style={{ fontWeight:800 }}>{Math.floor(timer/60)}:{String(timer%60).padStart(2,'0')}</div></div><button onClick={()=>setPhase('vote')} style={{ marginTop:16, padding:'10px 20px', background:'#FDE047', border:'1px solid #14171B', borderRadius:6, fontWeight:700 }}>Passer au vote</button></>)}
+              {phase==='vote' && (
+                <div>
+                  <h2 style={{ fontFamily:'Georgia, serif' }}>Vote : Est-ce que ça reste ou ça bouge?</h2>
+                  <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:10, marginTop:16 }}>
+                    <button onClick={()=>handleVote('reste')} style={{ padding:'18px 12px', background:'#FDE047', border:'2px solid #14171B', borderRadius:10, fontWeight:800, fontSize:16 }}>RESTE</button>
+                    <button onClick={()=>handleVote('bouge')} style={{ padding:'18px 12px', background:'#EF4444', color:'#FFF', border:'2px solid #14171B', borderRadius:10, fontWeight:800, fontSize:16 }}>BOUGE</button>
+                    <button onClick={()=>handleVote('neutre')} style={{ padding:'18px 12px', background:'#E5E7EB', border:'2px solid #14171B', borderRadius:10, fontWeight:800, fontSize:16 }}>NEUTRE</button>
+                  </div>
+                  <div style={{ marginTop:12, fontSize:12, opacity:0.7 }}>Abstention = j'hésite / je ne sais pas. Compte dans la majorité.</div>
+                  {isFacilitator && <button onClick={handleDecompte} style={{ marginTop:16, padding:'10px 20px', background:'#14171B', color:'#FFF', borderRadius:6 }}>Décompte → Résultat</button>}
+                </div>
+              )}
+              {phase==='resultat' && resultat && (
+                <div>
+                  <h2 style={{ fontFamily:'Georgia, serif', fontSize:22, marginBottom:8 }}>Résultat : {resultat.condition}</h2>
+                  <div style={{ display:'flex', gap:8, marginBottom:12, fontSize:12 }}>
+                    <span>Signal: <b>{resultat.positionSignal}</b></span><span>→</span><span>Finale: <b>{resultat.positionFinale}</b></span>
+                    <span style={{ padding:'2px 10px', borderRadius:20, background:'#14171B', color:'#FFF' }}>Majorité: {resultat.majorite} {resultat.majorite==='neutre'?' (abstention)':''}</span>
+                    <span style={{ padding:'2px 10px', borderRadius:20, background: resultat.pariGagnant==='jaune'? '#FDE047':'#EF4444', color: resultat.pariGagnant==='jaune'? '#14171B':'#FFF' }}>Gagnant: {resultat.pariGagnant==='jaune'?'Jaune':'Rouge'}</span>
+                  </div>
+                  <div style={{ display:'flex', height:22, borderRadius:8, overflow:'hidden', border:'1px solid #14171B', marginBottom:12 }}>
+                    {(()=>{
+                      const total = (resultat.reste||0)+(resultat.bouge||0)+((resultat as any).neutre||0) || 1;
+                      const pr = Math.round(((resultat.reste||0)/total)*100);
+                      const pb = Math.round(((resultat.bouge||0)/total)*100);
+                      const pn = 100-pr-pb;
+                      return (<>
+                        <div style={{ width:`${pr}%`, background:'#FDE047', display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, fontWeight:700 }}>{pr>10? `RESTE ${resultat.reste} ${pr}%`:''}</div>
+                        <div style={{ width:`${pb}%`, background:'#EF4444', color:'#FFF', display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, fontWeight:700 }}>{pb>10? `BOUGE ${resultat.bouge} ${pb}%`:''}</div>
+                        <div style={{ width:`${pn}%`, background:'#E5E7EB', display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, fontWeight:700 }}>{pn>10? `NEUTRE ${(resultat as any).neutre} ${pn}%`:''}</div>
+                      </>)
+                    })()}
+                  </div>
+                  <div style={{ fontSize:12, marginBottom:12 }}>{resultat.gagnants.length} gagnants • {resultat.perdants.length} perdants</div>
+                  {isFacilitator && (
+                    <div style={{ display:'flex', gap:8 }}>
+                      <button onClick={tirerAll} style={{ padding:'12px 20px', background:'#14171B', color:'#FFF', borderRadius:6, fontWeight:700 }}>Plan d'action ALL → 3 cartes</button>
+                      <button onClick={()=>{ if(cardIdx < cartesDiag.length-1){ setCardIdx(i=>i+1); setPhase('signal'); setResultat(null); setVotes([]); } else { setPhase('fermeture'); } }} style={{ padding:'12px 20px', background:'#FFF', border:'1px solid #14171B', borderRadius:6 }}>Carte suivante</button>
+                    </div>
+                  )}
+                </div>
+              )}
+              {phase==='fermeture_all' && (
+                <div>
+                  <h2 style={{ fontFamily:'Georgia, serif', fontSize:24, marginBottom:16 }}>Plan d'action — 3 cartes ALL (Niveau 1/2/3)</h2>
+                  <div style={{ display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:12 }}>
+                    {allTirees.map((c:any)=>(
+                      <div key={c.id} style={{ border:`2px solid ${c.couleur||'#14171B'}`, borderRadius:10, padding:14, background:'#FFF' }}>
+                        <div style={{ fontSize:10, fontFamily:'monospace', opacity:0.6 }}>{c.id} • N{c.niveau} • {c.delai}</div>
+                        <div style={{ fontWeight:800, fontSize:14, margin:'6px 0' }}>{c.titre}</div>
+                        <div style={{ fontSize:12 }}>{c.action}</div>
+                        <div style={{ fontSize:10, marginTop:8, opacity:0.6 }}>Indicateur: {c.indicateur}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <button onClick={()=>setPhase('fermeture')} style={{ marginTop:20, padding:'12px 24px', background:'#14171B', color:'#FFF', borderRadius:6 }}>Terminer session → Rapport</button>
+                </div>
+              )}
+              {phase==='fermeture' && (<div><h2>Session terminée</h2><a href={`/rapport-profond?sessionId=${sessionId}`} style={{ display:'inline-block', marginTop:12, padding:'10px 20px', background:'#14171B', color:'#FFF', borderRadius:6, textDecoration:'none' }}>Voir rapport profond avec neutre</a></div>)}
+            </div>
           </div>
-          <PunctumBoard pions={pions} retineLabel={carte?.id} retineSublabel={PHASE_LABEL[phase]} showCompteur={phase!== 'cadrage'} />
-          {phase === 'argumentation' && <ArgumentTimerFacilitator dureeTotalSec={dureeArgSec} joueurs={joueurs} />}
-          {phase === 'vote' && <VotePanel votes={votes} joueurs={joueurs} />}
-          {phase === 'decompte' && resultat && <ResultatPanel resultat={resultat} />}
-        </div>
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <AudioPermission label="Visio facilitateur" />
-          <JoueursList joueurs={joueurs} pions={pions} votes={votes} />
-          <DureeControl dureeArgSec={dureeArgSec} setDureeArgSec={setDureeArgSec} />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PlayerView({ phase, carte, monPion, playerNick, joueurs, onDeplacer, onVoter, monVote, resultat, dureeArgSec, playerId }: any) {
-  return (
-    <div style={{ minHeight: '100vh', background: '#F4EFE2', padding: 12 }}>
-      <div style={{ maxWidth: 520, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', background: '#14171B', color: '#FBF8EF', borderRadius: 6 }}>
-          <span style={{ fontSize: 13, fontWeight: 600 }}>{playerNick}</span>
-          <span style={{ fontSize: 10, fontFamily: 'ui-monospace, monospace', opacity: 0.7 }}>{PHASE_LABEL[phase]} • {carte?.id}</span>
-        </div>
-        {carte && <CardVisual card={carte} face={phase === 'signal' || phase === 'cadrage'? 'signal' : 'situation'} size="xs" />}
-        <PunctumBoard pions={monPion? [monPion] : []} onQuadrantClick={['cadrage', 'signal', 'situation', 'argumentation'].includes(phase)? onDeplacer : undefined} selectedQuadrant={monPion?.quadrantActuel} retineLabel={carte?.id} retineSublabel={PHASE_LABEL[phase]} />
-        {phase === 'argumentation' && <ArgumentTimerPlayer dureeTotalSec={dureeArgSec} joueurs={joueurs} playerId={playerId} />}
-        {phase === 'vote' && <VotePlayer monVote={monVote} onVoter={onVoter} />}
-        {phase === 'decompte' && resultat && <ResultatPanel resultat={resultat} compact />}
-        <AudioPermission label="Visio joueur" />
-      </div>
-    </div>
-  );
-}
-
-function ControlsFacilitator({ phase, onSetPhase, onVerrouiller, onLancerDecompte, onCarteSuivante, cardIdx, onSetCardIdx, cartesCount }: any) {
-  const btnStyle: React.CSSProperties = {
-    padding: '10px 14px',
-    border: '1px solid #14171B',
-    background: '#14171B',
-    color: '#FBF8EF',
-    borderRadius: 4,
-    fontSize: 12,
-    fontWeight: 600,
-    cursor: 'pointer',
-  };
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div style={{ padding: 12, background: '#FBF8EF', borderRadius: 6, border: '1px solid rgba(20,23,27,0.15)' }}>
-        <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'rgba(20,23,27,0.5)', marginBottom: 8 }}>Sélection carte ({cartesCount})</div>
-        <input type="range" min={0} max={cartesCount - 1} value={cardIdx} onChange={(e) => onSetCardIdx(parseInt(e.target.value, 10))} style={{ width: '100%' }} />
-      </div>
-      {phase === 'cadrage' && <button style={btnStyle} onClick={() => onSetPhase('signal')}>▶ Démarrer la partie</button>}
-      {phase === 'signal' && <button style={btnStyle} onClick={() => { onVerrouiller(); onSetPhase('situation'); }}>✓ Verrouiller les pions (jaune)</button>}
-      {phase === 'situation' && <button style={btnStyle} onClick={() => onSetPhase('argumentation')}>▶ Lancer l'argumentation</button>}
-      {phase === 'vote' && <button style={btnStyle} onClick={onLancerDecompte}>✓ Révéler le résultat</button>}
-      {phase === 'decompte' && <button style={btnStyle} onClick={onCarteSuivante}>▶ Carte suivante</button>}
-    </div>
-  );
-}
-
-function VotePanel({ votes, joueurs }: any) {
-  const reste = votes.filter((v: Vote) => v.choix === 'reste').length;
-  const bouge = votes.filter((v: Vote) => v.choix === 'bouge').length;
-  const neutre = votes.filter((v: Vote) => v.choix === 'neutre').length;
-  return (
-    <div style={{ padding: 16, background: '#FBF8EF', borderRadius: 6, border: '1px solid rgba(20,23,27,0.15)' }}>
-      <div style={{ display: 'flex', gap: 16, justifyContent: 'center' }}>
-        <div style={{ textAlign: 'center' }}><div style={{ fontFamily: 'Georgia, serif', fontSize: 32, fontWeight: 700 }}>{reste}</div><div style={{ fontSize: 11, opacity: 0.6 }}>Reste</div></div>
-        <div style={{ textAlign: 'center' }}><div style={{ fontFamily: 'Georgia, serif', fontSize: 32, fontWeight: 700 }}>{bouge}</div><div style={{ fontSize: 11, opacity: 0.6 }}>Bouge</div></div>
-        <div style={{ textAlign: 'center' }}><div style={{ fontFamily: 'Georgia, serif', fontSize: 32, fontWeight: 700 }}>{neutre}</div><div style={{ fontSize: 11, opacity: 0.6 }}>Neutre</div></div>
-      </div>
-      <div style={{ marginTop: 12, fontSize: 11, opacity: 0.6, textAlign: 'center' }}>{votes.length}/{joueurs.length} votes • R:{reste} B:{bouge} N:{neutre}</div>
-    </div>
-  );
-}
-
-function VotePlayer({ monVote, onVoter }: any) {
-  const voteReste = monVote?.choix === 'reste';
-  const voteBouge = monVote?.choix === 'bouge';
-  const voteNeutre = monVote?.choix === 'neutre';
-  return (
-    <div style={{ padding: 16, background: '#FBF8EF', borderRadius: 6, border: '1px solid rgba(20,23,27,0.15)', display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.6, textAlign: 'center' }}>Vote final — 3 choix</div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
-        <button onClick={() => onVoter('reste')} style={{ padding: 14, background: voteReste? '#FDE047' : '#FFFFFF', color: '#14171B', border: voteReste? '3px solid #14171B' : '2px solid rgba(20,23,27,0.3)', borderRadius: 6, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>{voteReste? '✓ Reste' : 'Reste'}</button>
-        <button onClick={() => onVoter('bouge')} style={{ padding: 14, background: voteBouge? '#EF4444' : '#FFFFFF', color: voteBouge? '#FFFFFF' : '#14171B', border: voteBouge? '3px solid #14171B' : '2px solid rgba(20,23,27,0.3)', borderRadius: 6, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>{voteBouge? '✓ Bouge' : 'Bouge'}</button>
-        <button onClick={() => onVoter('neutre')} style={{ padding: 14, background: voteNeutre? '#E5E7EB' : '#FFFFFF', color: '#14171B', border: voteNeutre? '3px solid #14171B' : '2px solid rgba(20,23,27,0.3)', borderRadius: 6, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>{voteNeutre? '✓ Neutre' : 'Neutre'}</button>
-      </div>
-      <div style={{ fontSize: 10, opacity: 0.5, textAlign: 'center' }}>Jaune = Reste • Rouge = Bouge • Gris = Neutre/abstention</div>
-    </div>
-  );
-}
-
-function ResultatPanel({ resultat, compact }: { resultat: ResultatCarte; compact?: boolean }) {
-  const reste = (resultat as any).reste?? 0;
-  const bouge = (resultat as any).bouge?? 0;
-  const neutre = (resultat as any).neutre?? 0;
-  const total = reste + bouge + neutre;
-  return (
-    <div style={{ padding: compact? 12 : 16, background: '#14171B', color: '#FBF8EF', borderRadius: 6 }}>
-      <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, letterSpacing: '0.14em', textTransform: 'uppercase', opacity: 0.6 }}>Résultat • {resultat.cardId}</div>
-      <div style={{ fontFamily: 'Georgia, serif', fontSize: 20, fontWeight: 700, marginTop: 6 }}>{LIBELLE_CONDITION[resultat.condition]}</div>
-      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>{DESCRIPTION_CONDITION[resultat.condition]}</div>
-      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-        <div style={{ flex: 1, background: '#FDE047', color: '#14171B', borderRadius: 4, padding: '8px 10px', textAlign: 'center' }}>
-          <div style={{ fontSize: 10, opacity: 0.6, textTransform: 'uppercase' }}>RESTE</div>
-          <div style={{ fontSize: 22, fontWeight: 800 }}>{reste}</div>
-          <div style={{ fontSize: 10 }}>{total? Math.round(reste/total*100) : 0}%</div>
-        </div>
-        <div style={{ flex: 1, background: '#EF4444', color: '#FBF8EF', borderRadius: 4, padding: '8px 10px', textAlign: 'center' }}>
-          <div style={{ fontSize: 10, opacity: 0.8, textTransform: 'uppercase' }}>BOUGE</div>
-          <div style={{ fontSize: 22, fontWeight: 800 }}>{bouge}</div>
-          <div style={{ fontSize: 10 }}>{total? Math.round(bouge/total*100) : 0}%</div>
-        </div>
-        <div style={{ flex: 1, background: '#E5E7EB', color: '#14171B', borderRadius: 4, padding: '8px 10px', textAlign: 'center' }}>
-          <div style={{ fontSize: 10, opacity: 0.6, textTransform: 'uppercase' }}>NEUTRE</div>
-          <div style={{ fontSize: 22, fontWeight: 800 }}>{neutre}</div>
-          <div style={{ fontSize: 10 }}>{total? Math.round(neutre/total*100) : 0}%</div>
-        </div>
-      </div>
-      <div style={{ marginTop: 10, fontSize: 11, opacity: 0.6 }}>Majorité: {(resultat as any).majorite} • Gagnant: {resultat.pariGagnant === 'jaune'? 'Jaune' : 'Rouge'} • {resultat.gagnants?.length || 0} gagnants</div>
-    </div>
-  );
-}
-
-function JoueursList({ joueurs, pions, votes }: any) {
-  return (
-    <div style={{ padding: 12, background: '#FBF8EF', borderRadius: 6, border: '1px solid rgba(20,23,27,0.15)' }}>
-      <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.5, marginBottom: 8 }}>Joueurs ({joueurs.length})</div>
-      {joueurs.map((j: Joueur) => {
-        const p = pions.find((pp: Pion) => pp.playerId === j.id);
-        const v = votes.find((vv: Vote) => vv.playerId === j.id);
-        return (
-          <div key={j.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 8px', fontSize: 12, borderBottom: '1px solid rgba(20,23,27,0.05)' }}>
-            <span>{j.nick}</span>
-            <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, opacity: 0.6 }}>{p? p.quadrantActuel : '—'} • {p?.couleur || '—'}{v? ` • ${v.choix}` : ''}</span>
+          <div>
+            <div style={{ background:'#FFF', border:'1px solid #14171B', borderRadius:12, padding:12 }}>
+              <div style={{ fontSize:11, fontWeight:700, marginBottom:8 }}>VOTES EN DIRECT — 3 COULEURS</div>
+              <div style={{ display:'flex', height:14, borderRadius:6, overflow:'hidden', border:'1px solid #14171B', marginBottom:8 }}>
+                {(()=>{
+                  const tot = counts.reste+counts.bouge+counts.neutre || 1;
+                  return (<>
+                    <div style={{ width:`${(counts.reste/tot)*100}%`, background:'#FDE047' }} />
+                    <div style={{ width:`${(counts.bouge/tot)*100}%`, background:'#EF4444' }} />
+                    <div style={{ width:`${(counts.neutre/tot)*100}%`, background:'#E5E7EB' }} />
+                  </>)
+                })()}
+              </div>
+              <div style={{ fontSize:12, display:'flex', justifyContent:'space-between' }}><span>R: {counts.reste}</span><span>B: {counts.bouge}</span><span>N: {counts.neutre}</span></div>
+              <div style={{ fontSize:11, marginTop:6, fontWeight:700 }}>Majorité: {counts.majorite} {counts.majorite==='neutre'?' (abstention → égalité pour condition)':''}</div>
+              <div style={{ marginTop:10, fontSize:11, maxHeight:200, overflowY:'auto' }}>{votes.filter(v=>v.cardId===carte?.id).map((v,i)=>(<div key={i} style={{ display:'flex', justifyContent:'space-between', borderBottom:'1px solid #f5f5f5', padding:'4px 0' }}><span>{v.playerId.slice(0,6)}</span><span style={{ padding:'1px 8px', borderRadius:10, background: v.choix==='reste'? '#FDE047': v.choix==='bouge'? '#EF4444':'#E5E7EB', color: v.choix==='bouge'? '#FFF':'#14171B', fontWeight:700, fontSize:10 }}>{v.choix}</span></div>))}</div>
+            </div>
           </div>
-        );
-      })}
+        </div>
+      </div>
     </div>
-  );
-}
-
-function DureeControl({ dureeArgSec, setDureeArgSec }: any) {
-  return (
-    <div style={{ padding: 12, background: '#FBF8EF', borderRadius: 6, border: '1px solid rgba(20,23,27,0.15)' }}>
-      <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.5, marginBottom: 8 }}>Durée argumentation : {Math.floor(dureeArgSec / 60)} min</div>
-      <input type="range" min={240} max={360} step={30} value={dureeArgSec} onChange={(e) => setDureeArgSec(parseInt(e.target.value, 10))} style={{ width: '100%' }} />
-    </div>
-  );
+  )
 }
