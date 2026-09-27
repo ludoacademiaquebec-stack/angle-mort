@@ -1,5 +1,5 @@
 'use client';
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
 import { getCartesDiag, getCartesAll } from '@/lib/cards';
@@ -8,36 +8,12 @@ const CARTES_ALL_STATIC = getCartesAll();
 type Faci = { id: string; code: string; name: string; email: string | null; active: boolean; created_at: string; last_login_at: string | null; };
 type Session = { id: string; code: string; company: string | null; facilitator_id: string | null; phase: string; status: string; started_at: string; };
 const FAMILLES = ['REC','MIC','PRI','CLI'] as const;
-
-const getRapportLink = (id: string) => `/rapport-profond?sessionId=${id}`;
-
-
-function SessionsRapportList(){
-  const [sessions, setSessions] = React.useState<any[]>([]);
-  React.useEffect(()=>{
-    const { supabase } = require('@/lib/supabase');
-    supabase.from('sessions').select('id, code, company, created_at').order('created_at', {ascending:false}).limit(20).then((r:any)=> setSessions(r.data||[]));
-  },[]);
-  return (
-    <div style={{ display:'grid', gap:8 }}>
-      {sessions.map((sess:any)=>(
-        <div key={sess.id} style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'10px 12px', border:'1px solid #eee', borderRadius:8 }}>
-          <div><div style={{fontSize:12, fontWeight:700, fontFamily:'monospace'}}>{sess.code} • {sess.company||'—'}</div><div style={{fontSize:10, opacity:0.6}}>{sess.id.slice(0,8)} • {new Date(sess.created_at).toLocaleDateString()}</div></div>
-          <a href={`/rapport-profond?sessionId=${sess.id}`} style={{ padding:'8px 14px', background:'#14171B', color:'#FFF', borderRadius:6, fontSize:12, fontWeight:700, textDecoration:'none' }}>Rapport 3 couleurs</a>
-        </div>
-      ))}
-      {sessions.length===0 && <div style={{fontSize:12, opacity:0.6}}>Aucune session</div>}
-    </div>
-  )
-}
-
-
 export default function SuperAdminPage() {
   const [auth, setAuth] = useState(false);
   const [code, setCode] = useState('');
   const [facis, setFacis] = useState<Faci[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
-  const [activeTab, setActiveTab] = useState<'facilitators' | 'sessions' | 'cartes' | 'all'>('facilitators');
+  const [activeTab, setActiveTab] = useState<'facilitators' | 'sessions' | 'cartes' | 'all' | 'rapport'>('facilitators');
   const [diag, setDiag] = useState<any[]>([]);
   const [all, setAll] = useState<any[]>([]);
   const [familleDiag, setFamilleDiag] = useState('REC');
@@ -79,7 +55,7 @@ export default function SuperAdminPage() {
     <div style={{ minHeight:'100vh', background:'#FFFEF9', color:'#14171B' }}>
       <header style={{ padding:'16px 24px', borderBottom:'1px solid #eee', display:'flex', justifyContent:'space-between', background:'#FFF' }}><div style={{ fontWeight:800 }}>Super Admin · Angle Mort</div><div style={{ display:'flex', gap:16, fontSize:13 }}><Link href="/">Landing</Link><Link href="/facilitateur">Facilitateur</Link></div></header>
       <div style={{ maxWidth:1400, margin:'0 auto', padding:24 }}>
-        <div style={{ display:'flex', gap:8, marginBottom:20 }}><button onClick={()=>setActiveTab('cartes')} style={{ padding:'10px 20px', background:activeTab==='cartes'? '#14171B':'#FFF', color:activeTab==='cartes'? '#FFF':'#14171B', border:'1px solid #14171B', borderRadius:6 }}>Cartes Diag ({diag.length})</button><button onClick={()=>setActiveTab('all')} style={{ padding:'10px 20px', background:activeTab==='all'? '#14171B':'#FFF', color:activeTab==='all'? '#FFF':'#14171B', border:'1px solid #14171B', borderRadius:6 }}>ALL ({all.length})</button></div>
+        <div style={{ display:'flex', gap:8, marginBottom:20 }}><button onClick={()=>setActiveTab('cartes')} style={{ padding:'10px 20px', background:activeTab==='cartes'? '#14171B':'#FFF', color:activeTab==='cartes'? '#FFF':'#14171B', border:'1px solid #14171B', borderRadius:6 }}>Cartes Diag ({diag.length})</button><button onClick={()=>setActiveTab('all')} style={{ padding:'10px 20px', background:activeTab==='all'? '#14171B':'#FFF', color:activeTab==='all'? '#FFF':'#14171B', border:'1px solid #14171B', borderRadius:6 }}>ALL ({all.length})</button><button onClick={()=>setActiveTab('rapport')} style={{ padding:'10px 20px', background:activeTab==='rapport'? '#14171B':'#FFF', color:activeTab==='rapport'? '#FFF':'#14171B', border:'1px solid #14171B', borderRadius:6 }}>Rapport profond</button></div>
         <div style={{ display:'grid', gridTemplateColumns:'340px 1fr', gap:20 }}>
           <div style={{ background:'#FFF', border:'1px solid #14171B', borderRadius:12, padding:16, maxHeight:'80vh', overflowY:'auto' }}>
             <input placeholder="Rechercher" value={search} onChange={e=>setSearch(e.target.value)} style={{ width:'100%', padding:'8px 10px', borderRadius:4, border:'1px solid #14171B', fontSize:12, marginBottom:12, boxSizing:'border-box' }} />
@@ -88,12 +64,6 @@ export default function SuperAdminPage() {
           </div>
           <div style={{ background:'#FFF', border:'1px solid #14171B', borderRadius:12, padding:20 }}>{!selected? <div>Selectionne une carte</div> : (<div><h2>{selected.id} — {selected.titre}</h2><button onClick={saveCard} disabled={saving} style={{ padding:'10px 18px', background:'#14171B', color:'#FFF', borderRadius:6, marginTop:12 }}>{saving? 'Sauvegarde...' : 'Sauvegarder en prod'}</button></div>)}</div>
         </div>
-
-      <div style={{ marginTop:30, background:'#FFF', border:'1px solid #14171B', borderRadius:12, padding:20 }}>
-        <h3 style={{ fontFamily:'Georgia, serif', marginBottom:12 }}>Sessions → Rapports profonds (avec neutre)</h3>
-        <SessionsRapportList />
-      </div>
-
       </div>
     </div>
   );
