@@ -725,7 +725,7 @@ const CARTES_CLI: CarteDiagnostique[] = [
 // CARTES ALL — Alliés en action (01-15)
 // Réservées à la fermeture, jamais en tirage aléatoire
 // ------------------------------------------------------------
-const CARTES_ALL: CarteAll[] = [
+export const CARTES_ALL: CarteAll[] = [
   {
     id: 'ALL-01',
     famille: 'ALL',
