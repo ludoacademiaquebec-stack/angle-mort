@@ -92,7 +92,7 @@ export interface Joueur {
 export interface Vote {
   playerId: string;
   nick: string;
-  choix: 'reste' | 'bouge';
+  choix: 'reste' | 'bouge' | 'neutre' | 'neutre';
   timestamp: number;
 }
 
@@ -106,6 +106,10 @@ export interface ResultatCarte {
   gagnants: string[];                 // playerIds
   perdants: string[];                 // playerIds
   timestamp: number;
+ reste?: number;
+ bouge?: number;
+ neutre?: number;
+ majorite?: 'reste' | 'bouge' | 'neutre' | 'neutre' | 'egalite';
 }
 
 // ---------- SESSION (état complet) ----------

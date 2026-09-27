@@ -931,3 +931,68 @@ export const STATS_CARTES = {
     ALL: CARTES_ALL.length,
   },
 };
+
+// ------------------------------------------------------------
+// PROD : chargement depuis Supabase avec fallback statique
+// ------------------------------------------------------------
+import { supabase as supabaseClient } from './supabase';
+
+let CACHE_DIAG: CarteDiagnostique[] | null = null;
+let CACHE_ALL: CarteAll[] | null = null;
+
+export async function loadCardsDiagFromDB(): Promise<CarteDiagnostique[]> {
+  if (CACHE_DIAG) return CACHE_DIAG;
+  try {
+    const { data } = await supabaseClient.from('cards_diag').select('*').order('ordre', { ascending: true });
+    if (data && data.length > 0) {
+      CACHE_DIAG = data.map((r:any) => ({
+        id: r.id, famille: r.famille, titre: r.titre, image: r.image, signal: r.signal, situation: r.situation,
+        question: r.question, motPiege: r.mot_piege, compteur: r.compteur, compteurLabel: r.compteur_label,
+        extra: r.extra_type? { type: r.extra_type, texte: r.extra_texte } : r.extra || undefined,
+        ordre: r.ordre
+      })) as CarteDiagnostique[];
+      return CACHE_DIAG;
+    }
+  } catch {}
+  // Fallback signal_cards ancienne table
+  try {
+    const { data } = await supabaseClient.from('signal_cards').select('*').order('ordre', { ascending: true });
+    if (data && data.length > 0) {
+      CACHE_DIAG = data.map((r:any) => ({
+        id: r.id, famille: r.famille, titre: r.titre, image: r.image, signal: r.signal, situation: r.situation,
+        question: r.question, motPiege: r.mot_piege, compteur: r.compteur, compteurLabel: r.compteur_label,
+        extra: r.extra || undefined, ordre: r.ordre
+      })) as CarteDiagnostique[];
+      return CACHE_DIAG;
+    }
+  } catch {}
+  CACHE_DIAG = CARTES_DIAG;
+  return CACHE_DIAG;
+}
+
+export async function loadCardsAllFromDB(): Promise<CarteAll[]> {
+  if (CACHE_ALL) return CACHE_ALL;
+  try {
+    const { data } = await supabaseClient.from('cards_all').select('*').order('ordre', { ascending: true });
+    if (data && data.length > 0) {
+      CACHE_ALL = data.map((r:any) => ({
+        id: r.id, famille: 'ALL', titre: r.titre, action: r.action, indicateur: r.indicateur, delai: r.delai, niveau: r.niveau, couleur: r.couleur, ordre: r.ordre
+      })) as CarteAll[];
+      return CACHE_ALL;
+    }
+  } catch {}
+  CACHE_ALL = CARTES_ALL;
+  return CACHE_ALL;
+}
+
+export async function getCarteByIdAsync(id: string) {
+  const diag = await loadCardsDiagFromDB();
+  const all = await loadCardsAllFromDB();
+  return diag.find(c=>c.id===id)?? all.find(c=>c.id===id);
+}
+
+export async function tirerCartesDiagAsync(n: number) {
+  const diag = await loadCardsDiagFromDB();
+  const shuffled = [...diag].sort(()=>Math.random()-0.5);
+  return shuffled.slice(0,n);
+}

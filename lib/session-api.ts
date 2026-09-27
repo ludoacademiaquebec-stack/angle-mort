@@ -70,7 +70,7 @@ export async function savePari(
   playerId: string,
   nick: string,
   cardId: string,
-  pari: 'reste' | 'bouge'
+  pari: 'reste' | 'bouge' | 'neutre' | 'neutre'
 ) {
   return post(sessionId, {
     action: 'upsert_pari',
