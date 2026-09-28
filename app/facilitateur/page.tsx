@@ -4,10 +4,12 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
+import { VERSION_CONFIG, Version } from '@/lib/types';
 
 export default function FacilitateurPage() {
   const [code, setCode] = useState('FACI-002');
   const [company, setCompany] = useState('');
+  const [version, setVersion] = useState<Version>('moyen');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [sessionCode, setSessionCode] = useState('');
@@ -19,11 +21,9 @@ export default function FacilitateurPage() {
     setLoading(true);
     const faciCode = code.trim().toUpperCase();
 
-    // 1. Sauve IMMÉDIATEMENT pour que /board ne te rejette pas
     localStorage.setItem('facilitator_code', faciCode);
     localStorage.setItem('facilitator_company', company.trim());
 
-    // 2. Vérifie FACI mais ne bloque pas si table vide (mode dev)
     const { data: faci } = await supabase
       .from('facilitators')
       .select('*')
@@ -31,20 +31,16 @@ export default function FacilitateurPage() {
       .eq('active', true)
       .single();
 
-    // Si pas trouvé, on continue quand même en dev, sinon erreur claire
     if (!faci) {
       console.warn('Facilitateur non trouvé, création session en mode dev avec', faciCode);
-      // Optionnel: décommente pour forcer l'erreur si tu veux
-      // setError(`Code ${faciCode} introuvable dans table facilitators. Va dans Supabase et INSERT le.`);
-      // setLoading(false); return;
     }
 
     const newId = 'SESS-' + Math.random().toString(36).substring(2, 8).toUpperCase();
-    // IMPORTANT: id et code = MÊME valeur pour éviter la confusion
     const { error: sessErr } = await supabase.from('sessions').insert({
       id: newId,
-      code: newId, // <- même code que l'id
+      code: newId,
       company: company.trim() || 'Test',
+      version,
       facilitator_id: faci?.id || null,
       phase: 'cadrage',
       status: 'active',
@@ -59,8 +55,6 @@ export default function FacilitateurPage() {
     setSessionCode(newId);
     setSessionId(newId);
     setLoading(false);
-    
-    // Redirection directe vers le board
     router.push('/board/' + newId);
   };
 
@@ -73,7 +67,7 @@ export default function FacilitateurPage() {
             {sessionCode}
           </div>
           <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 24 }}>
-            Partagez ce code avec vos joueurs
+            Version {VERSION_CONFIG[version].label} • Partagez ce code avec vos joueurs
           </div>
           <Link
             href={'/board/' + sessionId}
@@ -97,7 +91,7 @@ export default function FacilitateurPage() {
           Espace facilitateur
         </h1>
         <p style={{ opacity: 0.7, fontSize: 14, marginBottom: 24 }}>
-          Code FACI-002 + entreprise = démarrage direct
+          Code facilitateur + entreprise + version = démarrage direct
         </p>
 
         <div style={{ background: '#FBF8EF', border: '2px solid #14171B', borderRadius: 12, padding: 24 }}>
@@ -116,6 +110,30 @@ export default function FacilitateurPage() {
             placeholder="Institut Lumière"
             style={{ width: '100%', padding: 14, marginBottom: 16, border: '1px solid #14171B', borderRadius: 6, boxSizing: 'border-box' }}
           />
+
+          <label style={{ fontSize: 12, fontWeight: 700, display: 'block', marginBottom: 8 }}>Version du jeu</label>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 20 }}>
+            {(Object.keys(VERSION_CONFIG) as Version[]).map((v) => (
+              <button
+                key={v}
+                onClick={() => setVersion(v)}
+                style={{
+                  padding: 12,
+                  background: version === v ? '#14171B' : '#FFF',
+                  color: version === v ? '#FBF8EF' : '#14171B',
+                  border: version === v ? '2px solid #14171B' : '1px solid rgba(20,23,27,0.3)',
+                  borderRadius: 6,
+                  fontSize: 12,
+                  fontWeight: version === v ? 700 : 500,
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  lineHeight: 1.3,
+                }}
+              >
+                {VERSION_CONFIG[v].label}
+              </button>
+            ))}
+          </div>
 
           {error && (
             <div style={{ background: '#FEE2E2', color: '#DC2626', padding: 12, borderRadius: 6, marginBottom: 12, fontSize: 13 }}>

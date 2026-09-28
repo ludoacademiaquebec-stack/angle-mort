@@ -1,28 +1,32 @@
 'use client';
 
 // ============================================================
-// ANGLE MORT v3.4.1 — GameEngine FINAL BUILD OK
-// v3.3 + analytics arrière-plan session_events SANS RIEN CASSER
+// ANGLE MORT v4.0.3 FINAL DÉFINITIF
+// Corrections :
+//  1. Tremblement carte (polling stabilisé via refs)
+//  2. Cartes synchronisées (facilitateur publie en DB)
+//  3. Votes pris en compte (re-fetch avant décompte)
+//  4. Crash décompte (spans séparés)
+//  5. Bug pion joueur
 // ============================================================
 
 import { useState, useMemo, useEffect, useRef } from 'react';
-import dynamic from 'next/dynamic';
 import { PunctumBoard } from './PunctumBoard';
 import { CardVisual } from './CardVisual';
 import { ArgumentTimerFacilitator, ArgumentTimerPlayer } from './ArgumentTimer';
 import { AudioPermission } from './AudioPermission';
+import { AllView } from './AllView';
+import { SyntheseView } from './SyntheseView';
 
-// Jitsi désactivé
-const _JitsiRoom_unused = dynamic(() => import('./JitsiRoom').then((m) => m.JitsiRoom), {
-  ssr: false,
-});
-
-import { CARTES_DIAG } from '../lib/cards';
+import { CARTES_DIAG, CARTES_ALL } from '../lib/cards';
 import {
   construireResultat,
   LIBELLE_CONDITION,
   DESCRIPTION_CONDITION,
+  COULEUR_CONDITION,
 } from '../lib/resolution';
+import { tirerCartesPourVersion } from '../lib/versions';
+import { tirerCartesAllIntelligent, syntheseGenerale } from '../lib/aller';
 import type {
   Pion,
   Vote,
@@ -30,9 +34,21 @@ import type {
   PhaseProtocole,
   Joueur,
   ResultatCarte,
+  Version,
+  CarteDiagnostique,
+  CarteAll,
+  Engagement,
 } from '../lib/types';
 import { useSessionSync } from '../lib/useSessionSync';
-import { loadSession, saveSession, savePion, savePlayer, savePari } from '../lib/session-api';
+import {
+  loadSession,
+  saveSession,
+  savePion,
+  savePlayer,
+  savePari,
+  saveResultatCarte,
+  saveEngagement,
+} from '../lib/session-api';
 
 type Role = 'facilitator' | 'player';
 
@@ -56,30 +72,137 @@ const PHASE_LABEL: Record<PhaseProtocole, string> = {
   fermeture_all: 'Fermeture ALL',
 };
 
+interface GameEngineProps {
+  sessionId: string;
+  role: Role;
+  playerId?: string;
+  playerNick?: string;
+  joueurs?: Joueur[];
+  versionInitiale?: Version;
+}
+
 export function GameEngine({
   sessionId,
   role,
   playerId,
   playerNick,
   joueurs = [],
-}: {
-  sessionId: string;
-  role: Role;
-  playerId?: string;
-  playerNick?: string;
-  joueurs?: Joueur[];
-}) {
+  versionInitiale = 'complet',
+}: GameEngineProps) {
   const [phase, setPhase] = useState<PhaseProtocole>('cadrage');
   const [cardIdx, setCardIdx] = useState(0);
+  const [version, setVersion] = useState<Version>(versionInitiale);
+  const [versionChargee, setVersionChargee] = useState(false);
+  const [cartesTirees, setCartesTirees] = useState<CarteDiagnostique[]>([]);
   const [pions, setPions] = useState<Pion[]>([]);
   const [votes, setVotes] = useState<Vote[]>([]);
   const [resultat, setResultat] = useState<ResultatCarte | null>(null);
+  const [resultatsCumules, setResultatsCumules] = useState<ResultatCarte[]>([]);
+  const [allTirees, setAllTirees] = useState<CarteAll[]>([]);
+  const [raisonnementsAll, setRaisonnementsAll] = useState<any[]>([]);
   const [dureeArgSec, setDureeArgSec] = useState(300);
   const [argumentationTerminee, setArgumentationTerminee] = useState(false);
+  const [engagements, setEngagements] = useState<Record<string, string>>({});
+  const [montrerSynthese, setMontrerSynthese] = useState(false);
 
-  // --- ANALYTICS ARRIERE-PLAN (ne bloque jamais) ---
   const cardShownAtRef = useRef<number>(Date.now());
   const lastMoverRef = useRef<string | null>(null);
+
+  // Refs stables pour le polling (fix tremblement)
+  const phaseRef = useRef(phase);
+  const cardIdxRef = useRef(cardIdx);
+  phaseRef.current = phase;
+  cardIdxRef.current = cardIdx;
+
+  // ----- Chargement initial complet (session + cartes) -----
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const data = await loadSession(sessionId);
+      if (cancelled || !data || data.empty) return;
+
+      if (data.phase) setPhase(data.phase);
+      if (typeof data.cardIdx === 'number' && data.cardIdx >= 0) setCardIdx(data.cardIdx);
+      if (data.version) {
+        setVersion(data.version as Version);
+      }
+      setVersionChargee(true);
+
+      if (data.depots && data.depots.length > 0) {
+        const p: Pion[] = data.depots.map((d: any) => ({
+          playerId: d.player_id,
+          nick: data.players?.find((pp: any) => pp.id === d.player_id)?.nick || 'Anonyme',
+          quadrantInitial: d.quadrant,
+          quadrantActuel: d.quadrant,
+          couleur: d.canal === 'situation' ? 'rouge' : d.slot === 1 ? 'rouge' : 'jaune',
+        }));
+        setPions(p);
+      }
+      if (data.paris && data.paris.length > 0) {
+        const v: Vote[] = data.paris.map((p: any) => ({
+          playerId: p.player_id,
+          nick: data.players?.find((pp: any) => pp.id === p.player_id)?.nick || 'Anonyme',
+          choix: p.pari,
+          cardId: p.card_id || p.question_id || '',
+          timestamp: new Date(p.created_at).getTime(),
+        }));
+        setVotes(v);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
+  // ----- Tirage cartes SYNCHRONISÉ (après chargement de la version) -----
+  // Facilitateur : tire ET publie en DB
+  // Joueur : lit depuis DB, ou fallback tirage déterministe
+  useEffect(() => {
+    if (!versionChargee) return; // ⚠️ Attendre que la version soit chargée
+    if (cartesTirees.length > 0) return;
+
+    (async () => {
+      // 1. Essayer de lire cards_tirees depuis la DB (le facilitateur les a peut-être publiées)
+      const data = await loadSession(sessionId);
+      if (data?.cards_tirees && Array.isArray(data.cards_tirees) && data.cards_tirees.length > 0) {
+        const ids: string[] = data.cards_tirees;
+        const cartes = ids
+          .map((id) => CARTES_DIAG.find((c) => c.id === id))
+          .filter(Boolean) as CarteDiagnostique[];
+        if (cartes.length > 0) {
+          setCartesTirees(cartes);
+          return;
+        }
+      }
+
+      // 2. Sinon : tirage local déterministe (même seed = même résultat)
+      const cartes = tirerCartesPourVersion(version, sessionId);
+      setCartesTirees(cartes);
+
+      // 3. Le facilitateur publie pour les futurs joueurs
+      if (role === 'facilitator') {
+        try {
+          await saveSession(sessionId, {
+            cardsTirees: cartes.map((c) => c.id),
+          } as any);
+        } catch {}
+      }
+    })();
+  }, [versionChargee, version, sessionId, role, cartesTirees.length]);
+
+  // ----- Enregistrement joueur -----
+  useEffect(() => {
+    if (role === 'player' && playerId && playerNick) {
+      savePlayer(sessionId, playerId, playerNick);
+    }
+  }, [role, playerId, playerNick, sessionId]);
+
+  const sync = useSessionSync(sessionId, playerId, playerNick);
+  const localUpdateRef = (typeof window !== 'undefined' && (window as any).__AM_GRACE__) || { until: 0 };
+  if (typeof window !== 'undefined') (window as any).__AM_GRACE__ = localUpdateRef;
+  const marquerChangementLocal = () => {
+    localUpdateRef.until = Date.now() + 5000;
+  };
 
   const logEvent = async (evt: any) => {
     try {
@@ -88,62 +211,33 @@ export function GameEngine({
       await supabase.from('session_events').insert({
         session_id: sessionId,
         player_id: playerId || null,
-        nick: playerNick || (role === 'facilitator'? 'FACILITATEUR' : null),
-        latency_ms: evt.latency_ms?? Date.now() - cardShownAtRef.current,
-       ...evt,
+        nick: playerNick || (role === 'facilitator' ? 'FACILITATEUR' : null),
+        latency_ms: evt.latency_ms ?? Date.now() - cardShownAtRef.current,
+        ...evt,
       });
     } catch {}
   };
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const data = await loadSession(sessionId);
-      if (cancelled ||!data || data.empty) return;
-      if (data.phase) setPhase(data.phase);
-      if (typeof data.cardIdx === 'number' && data.cardIdx >= 0) setCardIdx(data.cardIdx);
-      if (data.depots && data.depots.length > 0) {
-        const pions: Pion[] = data.depots.map((d: any) => ({
-          playerId: d.player_id,
-          nick: data.players?.find((p: any) => p.id === d.player_id)?.nick || 'Anonyme',
-          quadrantInitial: d.quadrant,
-          quadrantActuel: d.quadrant,
-          couleur: d.canal === 'situation'? 'rouge' : d.slot === 1? 'rouge' : 'jaune',
-        }));
-        setPions(pions);
-      }
-      if (data.paris && data.paris.length > 0) {
-        const votes: Vote[] = data.paris.map((p: any) => ({
-          playerId: p.player_id,
-          nick: data.players?.find((pp: any) => pp.id === p.player_id)?.nick || 'Anonyme',
-          choix: p.pari,
-          timestamp: new Date(p.created_at).getTime(),
-        }));
-        setVotes(votes);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [sessionId]);
-
-  useEffect(() => {
-    if (role === 'player' && playerId && playerNick) {
-      savePlayer(sessionId, playerId, playerNick);
-    }
-  }, [role, playerId, playerNick, sessionId]);
-
-  const sync = useSessionSync(sessionId, playerId, playerNick);
-  const localUpdateRef = (typeof window!== 'undefined' && (window as any).__AM_GRACE__) || { until: 0 };
-  if (typeof window!== 'undefined') (window as any).__AM_GRACE__ = localUpdateRef;
-  const marquerChangementLocal = () => { localUpdateRef.until = Date.now() + 5000; };
-
   const changePhase = (newPhase: PhaseProtocole) => {
     marquerChangementLocal();
     setPhase(newPhase);
-    if (newPhase!== 'argumentation') setArgumentationTerminee(false);
+    if (newPhase !== 'argumentation') setArgumentationTerminee(false);
     if (role === 'facilitator') {
-      try { sync.sendPhase(newPhase); } catch {}
-      try { saveSession(sessionId, { phase: newPhase, cardIdx }); } catch {}
-      logEvent({ type: 'phase_change', from_quadrant: phase, to_quadrant: newPhase, question_id: CARTES_DIAG[cardIdx]?.id });
+      try {
+        sync.sendPhase(newPhase);
+      } catch {}
+      try {
+        saveSession(sessionId, { phase: newPhase, cardIdx });
+      } catch {}
+      const carteCourante = cartesTirees[cardIdx];
+      if (carteCourante) {
+        logEvent({
+          type: 'phase_change',
+          from_quadrant: phase,
+          to_quadrant: newPhase,
+          question_id: carteCourante.id,
+        });
+      }
     }
   };
 
@@ -153,26 +247,30 @@ export function GameEngine({
     cardShownAtRef.current = Date.now();
     lastMoverRef.current = null;
     if (role === 'facilitator') {
-      try { sync.sendCarte(newIdx); } catch {}
+      try {
+        sync.sendCarte(newIdx);
+      } catch {}
+      try {
+        saveSession(sessionId, { phase: 'signal', cardIdx: newIdx });
+      } catch {}
     }
-    logEvent({ type: 'card_shown', question_id: CARTES_DIAG[newIdx]?.id, metadata: { famille: CARTES_DIAG[newIdx]?.famille } });
   };
 
   useEffect(() => {
-    if (role === 'player' && sync.remotePhase && sync.remotePhase!== phase) {
+    if (role === 'player' && sync.remotePhase && sync.remotePhase !== phase) {
       setPhase(sync.remotePhase as PhaseProtocole);
     }
   }, [role, sync.remotePhase, phase]);
 
   useEffect(() => {
-    if (role === 'player' && sync.remoteCardIdx!== null && sync.remoteCardIdx!== cardIdx) {
+    if (role === 'player' && sync.remoteCardIdx !== null && sync.remoteCardIdx !== cardIdx) {
       setCardIdx(sync.remoteCardIdx);
       cardShownAtRef.current = Date.now();
     }
   }, [role, sync.remoteCardIdx, cardIdx]);
 
   useEffect(() => {
-    if (role!== 'facilitator') return;
+    if (role !== 'facilitator') return;
     const remote = Object.values(sync.remotePlayers);
     if (remote.length === 0) return;
     setPions((prev) => {
@@ -193,46 +291,64 @@ export function GameEngine({
 
   useEffect(() => {
     if (role === 'player' && sync.remoteResultat) {
-      setResultat(sync.remoteResultat);
+      setResultat(sync.remoteResultat as ResultatCarte);
     }
   }, [role, sync.remoteResultat]);
 
+  // ----- Polling STABILISÉ (dépend uniquement de sessionId) -----
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
       if (cancelled) return;
       try {
         const data = await loadSession(sessionId);
-        if (cancelled ||!data || data.empty) return;
-        if (data.phase && data.phase!== phase) setPhase(data.phase);
-        if (typeof data.cardIdx === 'number' && data.cardIdx >= 0 && data.cardIdx!== cardIdx) setCardIdx(data.cardIdx);
+        if (cancelled || !data || data.empty) return;
+
+        const curPhase = phaseRef.current;
+        const curCardIdx = cardIdxRef.current;
+
+        if (data.phase && data.phase !== curPhase) setPhase(data.phase);
+        if (
+          typeof data.cardIdx === 'number' &&
+          data.cardIdx >= 0 &&
+          data.cardIdx !== curCardIdx
+        ) {
+          setCardIdx(data.cardIdx);
+        }
+
         if (data.depots && Date.now() > localUpdateRef.until) {
-          const pions: Pion[] = data.depots.map((d: any) => ({
+          const p: Pion[] = data.depots.map((d: any) => ({
             playerId: d.player_id,
-            nick: data.players?.find((p: any) => p.id === d.player_id)?.nick || 'Anonyme',
+            nick: data.players?.find((pp: any) => pp.id === d.player_id)?.nick || 'Anonyme',
             quadrantInitial: d.quadrant,
             quadrantActuel: d.quadrant,
-            couleur: d.canal === 'situation'? 'rouge' : d.slot === 1? 'rouge' : 'jaune',
+            couleur: d.canal === 'situation' ? 'rouge' : d.slot === 1 ? 'rouge' : 'jaune',
           }));
-          setPions(pions);
+          setPions(p);
         }
+
         if (data.paris) {
-          const votes: Vote[] = data.paris.map((p: any) => ({
+          const v: Vote[] = data.paris.map((p: any) => ({
             playerId: p.player_id,
             nick: data.players?.find((pp: any) => pp.id === p.player_id)?.nick || 'Anonyme',
             choix: p.pari,
+            cardId: p.card_id || p.question_id || '',
             timestamp: new Date(p.created_at).getTime(),
           }));
-          setVotes(votes);
+          setVotes(v);
         }
       } catch {}
     };
     poll();
-    const iv = setInterval(poll, 2000);
-    return () => { cancelled = true; clearInterval(iv); };
+    const iv = setInterval(poll, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(iv);
+    };
   }, [sessionId]);
 
-  const carte = useMemo(() => CARTES_DIAG[cardIdx], [cardIdx]);
+  const carte: CarteDiagnostique | undefined = cartesTirees[cardIdx];
+  const totalCartes = cartesTirees.length || 1;
 
   const monPion = useMemo(() => {
     if (!playerId) return null;
@@ -243,13 +359,21 @@ export function GameEngine({
     const existing = pions.find((p) => p.playerId === pid);
     const prevQ = existing?.quadrantActuel || null;
     const isFirst = pions.length === 0;
-    const followedNick = lastMoverRef.current && lastMoverRef.current!== pid? pions.find(p => p.playerId === lastMoverRef.current)?.nick || null : null;
+    const followedNick =
+      lastMoverRef.current && lastMoverRef.current !== pid
+        ? pions.find((p) => p.playerId === lastMoverRef.current)?.nick || null
+        : null;
 
     let updated: Pion;
     if (existing) {
-      const couleur = existing.quadrantInitial && existing.quadrantInitial!== q? 'rouge' : existing.couleur === 'neutre'? 'neutre' : existing.couleur;
-      updated = {...existing, quadrantActuel: q, couleur };
-      setPions((prev) => prev.map((p) => (p.playerId === pid? updated : p)));
+      const couleur =
+        existing.quadrantInitial && existing.quadrantInitial !== q
+          ? 'rouge'
+          : existing.couleur === 'neutre'
+          ? 'neutre'
+          : existing.couleur;
+      updated = { ...existing, quadrantActuel: q, couleur };
+      setPions((prev) => prev.map((p) => (p.playerId === pid ? updated : p)));
     } else {
       updated = { playerId: pid, nick, quadrantInitial: q, quadrantActuel: q, couleur: 'neutre' };
       setPions((prev) => [...prev, updated]);
@@ -257,46 +381,123 @@ export function GameEngine({
     lastMoverRef.current = pid;
 
     if (pid === playerId) {
-      try { sync.sendPion(updated); } catch {}
-      savePion(sessionId, updated, carte.id).catch(() => {});
-      logEvent({
-        type: prevQ? 'change_quadrant' : 'move',
-        from_quadrant: prevQ,
-        to_quadrant: q,
-        question_id: carte.id,
-        latency_ms: Date.now() - cardShownAtRef.current,
-        metadata: { is_first: isFirst, followed_nick: followedNick, followed_someone:!!followedNick, hesitation:!!prevQ && prevQ!== q },
-      });
+      try {
+        sync.sendPion(updated);
+      } catch {}
+      if (carte) {
+        savePion(sessionId, updated, carte.id).catch(() => {});
+        logEvent({
+          type: prevQ ? 'change_quadrant' : 'move',
+          from_quadrant: prevQ,
+          to_quadrant: q,
+          question_id: carte.id,
+          latency_ms: Date.now() - cardShownAtRef.current,
+          metadata: {
+            is_first: isFirst,
+            followed_nick: followedNick,
+            followed_someone: !!followedNick,
+            hesitation: !!prevQ && prevQ !== q,
+          },
+        });
+      }
     }
   };
 
   const verrouillerPions = () => {
-    setPions((prev) => prev.map((p) => ({...p, couleur: p.couleur === 'neutre'? 'jaune' : p.couleur })));
-    logEvent({ type: 'lock_pions', question_id: carte.id, metadata: { pions_count: pions.length } });
-  };
-
-  const voter = (pid: string, nick: string, choix: 'reste' | 'bouge') => {
-   const newVote: Vote = { playerId: pid, nick, choix, cardId: carte.id, timestamp: Date.now() };
-    setVotes((prev) => [...prev.filter((v) => v.playerId!== pid), newVote]);
-    if (pid === playerId) {
-      try { sync.sendVote(newVote); } catch {}
-      try { savePari(sessionId, pid, nick, carte.id, choix); } catch {}
-      logEvent({ type: 'pari', to_quadrant: choix, question_id: carte.id, metadata: { choix, mon_quadrant: monPion?.quadrantActuel } });
+    setPions((prev) =>
+      prev.map((p) => ({ ...p, couleur: p.couleur === 'neutre' ? 'jaune' : p.couleur }))
+    );
+    if (carte) {
+      logEvent({
+        type: 'lock_pions',
+        question_id: carte.id,
+        metadata: { pions_count: pions.length },
+      });
     }
   };
 
-  const monVote = useMemo(() => (playerId? votes.find((v) => v.playerId === playerId) || null : null), [votes, playerId]);
+  const voter = (pid: string, nick: string, choix: 'reste' | 'bouge' | 'neutre') => {
+    const newVote: Vote = {
+      playerId: pid,
+      nick,
+      choix,
+      cardId: carte?.id || 'unknown',
+      timestamp: Date.now(),
+    };
+    setVotes((prev) => [...prev.filter((v) => v.playerId !== pid), newVote]);
+    if (pid === playerId) {
+      try {
+        sync.sendVote(newVote);
+      } catch {}
+      if (carte) {
+        savePari(sessionId, pid, nick, carte.id, choix).catch(() => {});
+        logEvent({
+          type: 'pari',
+          to_quadrant: choix,
+          question_id: carte.id,
+          metadata: { choix, mon_quadrant: monPion?.quadrantActuel },
+        });
+      }
+    }
+  };
 
-  const lancerDecompte = () => {
-    const res = construireResultat(carte.id, pions, votes);
+  const monVote = useMemo(
+    () => (playerId ? votes.find((v) => v.playerId === playerId) || null : null),
+    [votes, playerId]
+  );
+
+  // ----- Décompte ASYNC avec re-fetch des votes -----
+  const lancerDecompte = async () => {
+    if (!carte) return;
+
+    // Re-fetch depuis la DB pour avoir tous les votes à jour
+    let votesAJour = votes;
+    try {
+      const data = await loadSession(sessionId);
+      if (data?.paris) {
+        votesAJour = data.paris.map((p: any) => ({
+          playerId: p.player_id,
+          nick: data.players?.find((pp: any) => pp.id === p.player_id)?.nick || 'Anonyme',
+          choix: p.pari,
+          cardId: p.card_id || p.question_id || '',
+          timestamp: new Date(p.created_at).getTime(),
+        }));
+        setVotes(votesAJour);
+      }
+    } catch {}
+
+    const res = construireResultat(carte.id, pions, votesAJour, carte.famille);
+    if (!res) {
+      alert('Aucun vote ou aucun pion enregistré. Impossible de décompter.');
+      return;
+    }
     setResultat(res);
+    setResultatsCumules((prev) => [...prev, res]);
     changePhase('decompte');
-    try { sync.sendResultat(res); } catch {}
+    try {
+      sync.sendResultat(res);
+    } catch {}
+    saveResultatCarte(sessionId, res).catch(() => {});
     logEvent({ type: 'decompte', question_id: carte.id, metadata: { resultat: res } });
   };
 
   const carteSuivante = async () => {
-    const newIdx = (cardIdx + 1) % CARTES_DIAG.length;
+    const newIdx = cardIdx + 1;
+    if (newIdx >= totalCartes) {
+      const { cartes, raisonnements } = tirerCartesAllIntelligent(pions, votes, resultatsCumules);
+      setAllTirees(cartes);
+      setRaisonnementsAll(raisonnements);
+      setMontrerSynthese(true);
+      changePhase('fermeture_all');
+      try {
+        await saveSession(sessionId, {
+          phase: 'fermeture_all',
+          allSelectionnees: cartes.map((c) => c.id),
+        });
+      } catch {}
+      return;
+    }
+
     try {
       const supabase = (await import('../lib/supabase')).getSupabaseBrowser();
       await supabase.from('session_depots').delete().eq('session_id', sessionId);
@@ -304,7 +505,7 @@ export function GameEngine({
     } catch (e) {
       console.warn('[carteSuivante] Erreur suppression:', e);
     }
-    logEvent({ type: 'card_next', question_id: carte.id, metadata: { from: carte.id, to: CARTES_DIAG[newIdx].id } });
+
     changeCardIdx(newIdx);
     setPions([]);
     setVotes([]);
@@ -312,57 +513,230 @@ export function GameEngine({
     changePhase('signal');
   };
 
+  const enregistrerEngagement = (allCardId: string, texte: string) => {
+    setEngagements((prev) => ({ ...prev, [allCardId]: texte }));
+    if (playerId && playerNick && texte.trim()) {
+      const carteAll = allTirees.find((c) => c.id === allCardId);
+      const engagement: Engagement = {
+        sessionId,
+        playerId,
+        allCardId,
+        engagementText: texte,
+        indicateur: carteAll?.indicateur || '',
+        echeance: carteAll?.delai || 'J+7',
+      };
+      saveEngagement(engagement).catch(() => {});
+    }
+  };
+
   if (role === 'player' && playerId && playerNick) {
     return (
-      <PlayerView sessionId={sessionId} cardIdx={cardIdx} phase={phase} carte={carte} pions={pions} monPion={monPion} playerId={playerId} playerNick={playerNick} joueurs={joueurs} onDeplacer={(q) => deplacerPion(playerId, playerNick, q)} onVoter={(choix) => voter(playerId, playerNick, choix)} monVote={monVote} resultat={resultat} dureeArgSec={dureeArgSec} />
+      <PlayerView
+        phase={phase}
+        carte={carte}
+        monPion={monPion}
+        playerNick={playerNick}
+        playerId={playerId}
+        joueurs={joueurs}
+        onDeplacer={(q: Quadrant) => deplacerPion(playerId, playerNick, q)}
+        onVoter={(choix: 'reste' | 'bouge' | 'neutre') => voter(playerId, playerNick, choix)}
+        monVote={monVote}
+        resultat={resultat}
+        dureeArgSec={dureeArgSec}
+        allTirees={allTirees}
+        engagements={engagements}
+        onEngagement={enregistrerEngagement}
+      />
     );
   }
 
   return (
-    <FacilitatorView sessionId={sessionId} cardIdx={cardIdx} phase={phase} carte={carte} pions={pions} votes={votes} joueurs={joueurs} resultat={resultat} dureeArgSec={dureeArgSec} setDureeArgSec={setDureeArgSec} argumentationTerminee={argumentationTerminee} setArgumentationTerminee={setArgumentationTerminee} onDeplacer={deplacerPion} onVerrouillerPions={verrouillerPions} onLancerDecompte={lancerDecompte} onCarteSuivante={carteSuivante} onSetPhase={changePhase} onSetCardIdx={changeCardIdx} />
+    <FacilitatorView
+      sessionId={sessionId}
+      cardIdx={cardIdx}
+      totalCartes={totalCartes}
+      phase={phase}
+      carte={carte}
+      version={version}
+      pions={pions}
+      votes={votes}
+      joueurs={joueurs}
+      resultat={resultat}
+      dureeArgSec={dureeArgSec}
+      setDureeArgSec={setDureeArgSec}
+      argumentationTerminee={argumentationTerminee}
+      setArgumentationTerminee={setArgumentationTerminee}
+      onVerrouillerPions={verrouillerPions}
+      onLancerDecompte={lancerDecompte}
+      onCarteSuivante={carteSuivante}
+      onSetPhase={changePhase}
+      allTirees={allTirees}
+      raisonnementsAll={raisonnementsAll}
+      montrerSynthese={montrerSynthese}
+      setMontrerSynthese={setMontrerSynthese}
+      resultatsCumules={resultatsCumules}
+    />
   );
 }
 
-function FacilitatorView({ sessionId, cardIdx, phase, carte, pions, votes, joueurs, resultat, dureeArgSec, setDureeArgSec, argumentationTerminee, setArgumentationTerminee, onVerrouillerPions, onLancerDecompte, onCarteSuivante, onSetPhase, onSetCardIdx }: any) {
+// ============================================================
+// VUE FACILITATEUR
+// ============================================================
+function FacilitatorView({
+  sessionId,
+  cardIdx,
+  totalCartes,
+  phase,
+  carte,
+  version,
+  pions,
+  votes,
+  joueurs,
+  resultat,
+  dureeArgSec,
+  setDureeArgSec,
+  argumentationTerminee,
+  onVerrouillerPions,
+  onLancerDecompte,
+  onCarteSuivante,
+  onSetPhase,
+  allTirees,
+  raisonnementsAll,
+  montrerSynthese,
+  setMontrerSynthese,
+  resultatsCumules,
+}: any) {
   const indexPhase = PHASES_ORDER.indexOf(phase);
+
+  if (montrerSynthese) {
+    const synth = syntheseGenerale(pions, votes, resultatsCumules);
+    return (
+      <div style={{ minHeight: '100vh', background: '#F4EFE2', padding: 20 }}>
+        <div style={{ maxWidth: 1200, margin: '0 auto' }}>
+          <SyntheseView
+            company=""
+            version={version}
+            nbJoueurs={joueurs.length}
+            zonesRouges={synth.zonesRouges}
+            famillesChaudes={synth.famillesChaudes}
+            resultats={resultatsCumules}
+            tensionGlobale={synth.tensionGlobale}
+            onContinuer={() => setMontrerSynthese(false)}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ minHeight: '100vh', background: '#F4EFE2', padding: 20 }}>
-      <div style={{ maxWidth: 1400, margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 20px', background: '#14171B', color: '#FBF8EF', borderRadius: 6 }}>
+      <div
+        style={{
+          maxWidth: 1400,
+          margin: '0 auto 16px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '12px 20px',
+          background: '#14171B',
+          color: '#FBF8EF',
+          borderRadius: 6,
+        }}
+      >
         <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
           <span style={{ fontFamily: 'Georgia, serif', fontWeight: 700, fontSize: 16 }}>Angle Mort</span>
-          <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11, letterSpacing: '0.1em', opacity: 0.7 }}>{sessionId} • {joueurs.length} joueurs • {carte.id}</span>
-          <a href={`/rapport/${sessionId}`} target="_blank" style={{ fontSize: 10, background: '#FDE047', color: '#14171B', padding: '4px 8px', borderRadius: 3, textDecoration: 'none', fontWeight: 700 }}>RAPPORT PROFOND →</a>
+          <span
+            style={{
+              fontFamily: 'ui-monospace, monospace',
+              fontSize: 11,
+              letterSpacing: '0.1em',
+              opacity: 0.7,
+            }}
+          >
+            {sessionId} • {joueurs.length} joueurs • {carte?.id || '—'} [{cardIdx + 1}/{totalCartes}]
+          </span>
+          <a
+            href={`/rapport/${sessionId}`}
+            target="_blank"
+            style={{
+              fontSize: 10,
+              background: '#FDE047',
+              color: '#14171B',
+              padding: '4px 8px',
+              borderRadius: 3,
+              textDecoration: 'none',
+              fontWeight: 700,
+            }}
+          >
+            RAPPORT PROFOND →
+          </a>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           {PHASES_ORDER.slice(0, 6).map((p, i) => (
-            <div key={p} style={{ padding: '4px 10px', borderRadius: 3, fontSize: 10, fontFamily: 'ui-monospace, monospace', letterSpacing: '0.1em', background: i === indexPhase? '#FDE047' : 'rgba(255,255,255,0.08)', color: i === indexPhase? '#14171B' : '#FBF8EF', fontWeight: i === indexPhase? 700 : 400 }}>
-              {i + 1}. {PHASE_LABEL[p]}
+            <div
+              key={p}
+              style={{
+                padding: '4px 10px',
+                borderRadius: 3,
+                fontSize: 10,
+                fontFamily: 'ui-monospace, monospace',
+                letterSpacing: '0.1em',
+                background: i === indexPhase ? '#FDE047' : 'rgba(255,255,255,0.08)',
+                color: i === indexPhase ? '#14171B' : '#FBF8EF',
+                fontWeight: i === indexPhase ? 700 : 400,
+              }}
+            >
+              {i + 1}. {PHASE_LABEL[p as PhaseProtocole]}
             </div>
           ))}
         </div>
       </div>
 
-      <div style={{ maxWidth: 1400, margin: '0 auto', display: 'grid', gridTemplateColumns: '340px 1fr 320px', gap: 16 }}>
+      <div
+        style={{
+          maxWidth: 1400,
+          margin: '0 auto',
+          display: 'grid',
+          gridTemplateColumns: '340px 1fr 320px',
+          gap: 16,
+        }}
+      >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <CardVisual card={carte} face={phase === 'signal' || phase === 'cadrage'? 'signal' : 'situation'} size="xs" />
-          <ControlsFacilitator phase={phase} onSetPhase={onSetPhase} onVerrouiller={onVerrouillerPions} onLancerDecompte={onLancerDecompte} onCarteSuivante={onCarteSuivante} cardIdx={cardIdx} onSetCardIdx={onSetCardIdx} />
+          {carte && (
+            <CardVisual
+              card={carte}
+              face={phase === 'signal' || phase === 'cadrage' ? 'signal' : 'situation'}
+              size="xs"
+            />
+          )}
+          <ControlsFacilitator
+            phase={phase}
+            onSetPhase={onSetPhase}
+            onVerrouiller={onVerrouillerPions}
+            onLancerDecompte={onLancerDecompte}
+            onCarteSuivante={onCarteSuivante}
+            cardIdx={cardIdx}
+            totalCartes={totalCartes}
+          />
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {phase === 'argumentation' && (
-            <button onClick={() => onSetPhase('vote')} style={{ padding: '10px 16px', fontSize: 13, fontWeight: 700, background: argumentationTerminee? '#14171B' : '#FDE047', color: argumentationTerminee? '#FBF8EF' : '#14171B', border: '1px solid #14171B', borderRadius: 4, cursor: 'pointer', textAlign: 'center' }}>
-              {argumentationTerminee? '✓ Argumentation terminée — Passer au vote' : '⏱ Argumentation en cours — Cliquer pour passer au vote maintenant'}
-            </button>
+          <PhaseBar phase={phase} onSetPhase={onSetPhase} nbJoueurs={joueurs.length} />
+          {phase === 'fermeture_all' && allTirees.length > 0 ? (
+            <AllView cartes={allTirees} raisonnements={raisonnementsAll} role="facilitator" />
+          ) : (
+            carte && (
+              <PunctumBoard
+                pions={pions}
+                retineLabel={carte.id}
+                retineSublabel={PHASE_LABEL[phase as PhaseProtocole]}
+                showCompteur={phase !== 'cadrage'}
+              />
+            )
           )}
-          <div style={{ display: 'flex', gap: 8, padding: 12, background: '#FBF8EF', borderRadius: 6, border: '1px solid rgba(20,23,27,0.15)', flexWrap: 'wrap', alignItems: 'center' }}>
-            <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.5, marginRight: 8 }}>Phase :</span>
-            {['signal', 'situation', 'argumentation', 'vote', 'decompte'].map((p) => (
-              <button key={p} onClick={() => onSetPhase(p)} style={{ padding: '6px 12px', fontSize: 11, fontWeight: 600, border: phase === p? '2px solid #14171B' : '1px solid rgba(20,23,27,0.2)', background: phase === p? '#FDE047' : '#FFFFFF', color: '#14171B', borderRadius: 4, cursor: 'pointer', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{p}</button>
-            ))}
-            <span style={{ marginLeft: 'auto', fontSize: 11, opacity: 0.5 }}>→ {joueurs.length} joueurs</span>
-          </div>
-          <PunctumBoard pions={pions} retineLabel={carte.id} retineSublabel={PHASE_LABEL[phase]} showCompteur={phase!== 'cadrage'} />
-          {phase === 'argumentation' && <ArgumentTimerFacilitator dureeTotalSec={dureeArgSec} joueurs={joueurs} />}
+          {phase === 'argumentation' && (
+            <ArgumentTimerFacilitator dureeTotalSec={dureeArgSec} joueurs={joueurs} />
+          )}
           {phase === 'vote' && <VotePanel votes={votes} joueurs={joueurs} />}
           {phase === 'decompte' && resultat && <ResultatPanel resultat={resultat} />}
         </div>
@@ -377,17 +751,77 @@ function FacilitatorView({ sessionId, cardIdx, phase, carte, pions, votes, joueu
   );
 }
 
-function PlayerView({ phase, carte, monPion, playerNick, joueurs, onDeplacer, onVoter, monVote, resultat, dureeArgSec, playerId }: any) {
+// ============================================================
+// VUE JOUEUR
+// ============================================================
+function PlayerView({
+  phase,
+  carte,
+  monPion,
+  playerNick,
+  playerId,
+  joueurs,
+  onDeplacer,
+  onVoter,
+  monVote,
+  resultat,
+  dureeArgSec,
+  allTirees,
+  engagements,
+  onEngagement,
+}: any) {
   return (
     <div style={{ minHeight: '100vh', background: '#F4EFE2', padding: 12 }}>
       <div style={{ maxWidth: 520, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', background: '#14171B', color: '#FBF8EF', borderRadius: 6 }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '10px 14px',
+            background: '#14171B',
+            color: '#FBF8EF',
+            borderRadius: 6,
+          }}
+        >
           <span style={{ fontSize: 13, fontWeight: 600 }}>{playerNick}</span>
-          <span style={{ fontSize: 10, fontFamily: 'ui-monospace, monospace', opacity: 0.7 }}>{PHASE_LABEL[phase]} • {carte.id}</span>
+          <span style={{ fontSize: 10, fontFamily: 'ui-monospace, monospace', opacity: 0.7 }}>
+            {PHASE_LABEL[phase as PhaseProtocole]} • {carte?.id || '—'}
+          </span>
         </div>
-        <CardVisual card={carte} face={phase === 'signal' || phase === 'cadrage'? 'signal' : 'situation'} size="xs" />
-        <PunctumBoard pions={monPion? [monPion] : []} onQuadrantClick={['cadrage', 'signal', 'situation', 'argumentation'].includes(phase)? onDeplacer : undefined} selectedQuadrant={monPion?.quadrantActuel} retineLabel={carte.id} retineSublabel={PHASE_LABEL[phase]} />
-        {phase === 'argumentation' && <ArgumentTimerPlayer dureeTotalSec={dureeArgSec} joueurs={joueurs} playerId={playerId} />}
+
+        {phase === 'fermeture_all' && allTirees.length > 0 ? (
+          <AllView
+            cartes={allTirees}
+            raisonnements={[]}
+            role="player"
+            engagements={engagements}
+            onEngagement={onEngagement}
+          />
+        ) : (
+          <>
+            {carte && (
+              <CardVisual
+                card={carte}
+                face={phase === 'signal' || phase === 'cadrage' ? 'signal' : 'situation'}
+                size="xs"
+              />
+            )}
+            <PunctumBoard
+              pions={monPion ? [monPion] : []}
+              onQuadrantClick={
+                ['cadrage', 'signal', 'situation', 'argumentation'].includes(phase) ? onDeplacer : undefined
+              }
+              selectedQuadrant={monPion?.quadrantActuel}
+              retineLabel={carte?.id || ''}
+              retineSublabel={PHASE_LABEL[phase as PhaseProtocole]}
+            />
+          </>
+        )}
+
+        {phase === 'argumentation' && (
+          <ArgumentTimerPlayer dureeTotalSec={dureeArgSec} joueurs={joueurs} playerId={playerId} />
+        )}
         {phase === 'vote' && <VotePlayer monVote={monVote} onVoter={onVoter} />}
         {phase === 'decompte' && resultat && <ResultatPanel resultat={resultat} compact />}
         <AudioPermission label="Visio joueur" />
@@ -396,7 +830,18 @@ function PlayerView({ phase, carte, monPion, playerNick, joueurs, onDeplacer, on
   );
 }
 
-function ControlsFacilitator({ phase, onSetPhase, onVerrouiller, onLancerDecompte, onCarteSuivante, cardIdx, onSetCardIdx }: any) {
+// ============================================================
+// SOUS-COMPOSANTS
+// ============================================================
+function ControlsFacilitator({
+  phase,
+  onSetPhase,
+  onVerrouiller,
+  onLancerDecompte,
+  onCarteSuivante,
+  cardIdx,
+  totalCartes,
+}: any) {
   const btnStyle: React.CSSProperties = {
     padding: '10px 14px',
     border: '1px solid #14171B',
@@ -410,15 +855,105 @@ function ControlsFacilitator({ phase, onSetPhase, onVerrouiller, onLancerDecompt
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div style={{ padding: 12, background: '#FBF8EF', borderRadius: 6, border: '1px solid rgba(20,23,27,0.15)' }}>
-        <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'rgba(20,23,27,0.5)', marginBottom: 8 }}>Sélection carte</div>
-        <input type="range" min={0} max={CARTES_DIAG.length - 1} value={cardIdx} onChange={(e) => onSetCardIdx(parseInt(e.target.value, 10))} style={{ width: '100%' }} />
+      <div
+        style={{
+          padding: 12,
+          background: '#FBF8EF',
+          borderRadius: 6,
+          border: '1px solid rgba(20,23,27,0.15)',
+          fontSize: 11,
+          fontFamily: 'ui-monospace, monospace',
+        }}
+      >
+        Carte {cardIdx + 1} / {totalCartes}
       </div>
-      {phase === 'cadrage' && <button style={btnStyle} onClick={() => onSetPhase('signal')}>▶ Démarrer la partie</button>}
-      {phase === 'signal' && <button style={btnStyle} onClick={() => { onVerrouiller(); onSetPhase('situation'); }}>✓ Verrouiller les pions (jaune)</button>}
-      {phase === 'situation' && <button style={btnStyle} onClick={() => onSetPhase('argumentation')}>▶ Lancer l'argumentation</button>}
-      {phase === 'vote' && <button style={btnStyle} onClick={onLancerDecompte}>✓ Révéler le résultat</button>}
-      {phase === 'decompte' && <button style={btnStyle} onClick={onCarteSuivante}>▶ Carte suivante</button>}
+      {phase === 'cadrage' && (
+        <button style={btnStyle} onClick={() => onSetPhase('signal')}>
+          ▶ Démarrer la partie
+        </button>
+      )}
+      {phase === 'signal' && (
+        <button
+          style={btnStyle}
+          onClick={() => {
+            onVerrouiller();
+            onSetPhase('situation');
+          }}
+        >
+          ✓ Verrouiller les pions (jaune)
+        </button>
+      )}
+      {phase === 'situation' && (
+        <button style={btnStyle} onClick={() => onSetPhase('argumentation')}>
+          ▶ Lancer l'argumentation
+        </button>
+      )}
+      {phase === 'argumentation' && (
+        <button style={btnStyle} onClick={() => onSetPhase('vote')}>
+          ▶ Passer au vote
+        </button>
+      )}
+      {phase === 'vote' && (
+        <button style={btnStyle} onClick={onLancerDecompte}>
+          ✓ Révéler le résultat
+        </button>
+      )}
+      {phase === 'decompte' && (
+        <button style={btnStyle} onClick={onCarteSuivante}>
+          {cardIdx + 1 >= totalCartes ? '▶ Fermer avec les 3 ALL' : '▶ Carte suivante'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function PhaseBar({ phase, onSetPhase, nbJoueurs }: any) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        gap: 8,
+        padding: 12,
+        background: '#FBF8EF',
+        borderRadius: 6,
+        border: '1px solid rgba(20,23,27,0.15)',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+      }}
+    >
+      <span
+        style={{
+          fontFamily: 'ui-monospace, monospace',
+          fontSize: 10,
+          letterSpacing: '0.12em',
+          textTransform: 'uppercase',
+          opacity: 0.5,
+          marginRight: 8,
+        }}
+      >
+        Phase :
+      </span>
+      {['signal', 'situation', 'argumentation', 'vote', 'decompte'].map((p) => (
+        <button
+          key={p}
+          onClick={() => onSetPhase(p)}
+          style={{
+            padding: '6px 12px',
+            fontSize: 11,
+            fontWeight: 600,
+            border: phase === p ? '2px solid #14171B' : '1px solid rgba(20,23,27,0.2)',
+            background: phase === p ? '#FDE047' : '#FFFFFF',
+            color: '#14171B',
+            borderRadius: 4,
+            cursor: 'pointer',
+            textTransform: 'uppercase',
+            letterSpacing: '0.08em',
+          }}
+        >
+          {p}
+        </button>
+      ))}
+      <span style={{ marginLeft: 'auto', fontSize: 11, opacity: 0.5 }}>→ {nbJoueurs} joueurs</span>
     </div>
   );
 }
@@ -426,52 +961,230 @@ function ControlsFacilitator({ phase, onSetPhase, onVerrouiller, onLancerDecompt
 function VotePanel({ votes, joueurs }: any) {
   const reste = votes.filter((v: Vote) => v.choix === 'reste').length;
   const bouge = votes.filter((v: Vote) => v.choix === 'bouge').length;
+  const neutre = votes.filter((v: Vote) => v.choix === 'neutre').length;
   return (
-    <div style={{ padding: 16, background: '#FBF8EF', borderRadius: 6, border: '1px solid rgba(20,23,27,0.15)' }}>
+    <div
+      style={{
+        padding: 16,
+        background: '#FBF8EF',
+        borderRadius: 6,
+        border: '1px solid rgba(20,23,27,0.15)',
+      }}
+    >
       <div style={{ display: 'flex', gap: 16, justifyContent: 'center' }}>
-        <div style={{ textAlign: 'center' }}><div style={{ fontFamily: 'Georgia, serif', fontSize: 32, fontWeight: 700 }}>{reste}</div><div style={{ fontSize: 11, opacity: 0.6 }}>Reste</div></div>
-        <div style={{ textAlign: 'center' }}><div style={{ fontFamily: 'Georgia, serif', fontSize: 32, fontWeight: 700 }}>{bouge}</div><div style={{ fontSize: 11, opacity: 0.6 }}>Bouge</div></div>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontFamily: 'Georgia, serif', fontSize: 32, fontWeight: 700, color: '#B8860B' }}>
+            {reste}
+          </div>
+          <div style={{ fontSize: 11, opacity: 0.6 }}>Reste</div>
+        </div>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontFamily: 'Georgia, serif', fontSize: 32, fontWeight: 700, color: '#EF4444' }}>
+            {bouge}
+          </div>
+          <div style={{ fontSize: 11, opacity: 0.6 }}>Bouge</div>
+        </div>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontFamily: 'Georgia, serif', fontSize: 32, fontWeight: 700, color: '#6B7280' }}>
+            {neutre}
+          </div>
+          <div style={{ fontSize: 11, opacity: 0.6 }}>Neutre</div>
+        </div>
       </div>
-      <div style={{ marginTop: 12, fontSize: 11, opacity: 0.6, textAlign: 'center' }}>{votes.length}/{joueurs.length} votes</div>
+      <div style={{ marginTop: 12, fontSize: 11, opacity: 0.6, textAlign: 'center' }}>
+        {votes.length}/{joueurs.length} votes
+      </div>
     </div>
   );
 }
 
 function VotePlayer({ monVote, onVoter }: any) {
-  const voteReste = monVote?.choix === 'reste';
-  const voteBouge = monVote?.choix === 'bouge';
+  const vR = monVote?.choix === 'reste';
+  const vB = monVote?.choix === 'bouge';
+  const vN = monVote?.choix === 'neutre';
   return (
-    <div style={{ padding: 16, background: '#FBF8EF', borderRadius: 6, border: '1px solid rgba(20,23,27,0.15)', display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.6, textAlign: 'center' }}>Vote final</div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-        <button onClick={() => onVoter('reste')} style={{ padding: 14, background: voteReste? '#FDE047' : '#FFFFFF', color: '#14171B', border: voteReste? '3px solid #14171B' : '2px solid rgba(20,23,27,0.3)', borderRadius: 6, fontSize: 14, fontWeight: 700, cursor: 'pointer' }}>{voteReste? '✓ Reste' : 'Reste'}</button>
-        <button onClick={() => onVoter('bouge')} style={{ padding: 14, background: voteBouge? '#EF4444' : '#FFFFFF', color: voteBouge? '#FFFFFF' : '#14171B', border: voteBouge? '3px solid #14171B' : '2px solid rgba(20,23,27,0.3)', borderRadius: 6, fontSize: 14, fontWeight: 700, cursor: 'pointer' }}>{voteBouge? '✓ Bouge' : 'Bouge'}</button>
+    <div
+      style={{
+        padding: 16,
+        background: '#FBF8EF',
+        borderRadius: 6,
+        border: '1px solid rgba(20,23,27,0.15)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+      }}
+    >
+      <div
+        style={{
+          fontFamily: 'ui-monospace, monospace',
+          fontSize: 10,
+          letterSpacing: '0.12em',
+          textTransform: 'uppercase',
+          opacity: 0.6,
+          textAlign: 'center',
+        }}
+      >
+        Vote final
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+        <button
+          onClick={() => onVoter('reste')}
+          style={{
+            padding: 14,
+            background: vR ? '#FDE047' : '#FFFFFF',
+            color: '#14171B',
+            border: vR ? '3px solid #14171B' : '2px solid rgba(20,23,27,0.3)',
+            borderRadius: 6,
+            fontSize: 13,
+            fontWeight: 700,
+            cursor: 'pointer',
+          }}
+        >
+          {vR ? '✓ Reste' : 'Reste'}
+        </button>
+        <button
+          onClick={() => onVoter('bouge')}
+          style={{
+            padding: 14,
+            background: vB ? '#EF4444' : '#FFFFFF',
+            color: vB ? '#FFFFFF' : '#14171B',
+            border: vB ? '3px solid #14171B' : '2px solid rgba(20,23,27,0.3)',
+            borderRadius: 6,
+            fontSize: 13,
+            fontWeight: 700,
+            cursor: 'pointer',
+          }}
+        >
+          {vB ? '✓ Bouge' : 'Bouge'}
+        </button>
+        <button
+          onClick={() => onVoter('neutre')}
+          style={{
+            padding: 14,
+            background: vN ? '#6B7280' : '#FFFFFF',
+            color: vN ? '#FFFFFF' : '#14171B',
+            border: vN ? '3px solid #14171B' : '2px solid rgba(20,23,27,0.3)',
+            borderRadius: 6,
+            fontSize: 13,
+            fontWeight: 700,
+            cursor: 'pointer',
+          }}
+        >
+          {vN ? '✓ Neutre' : 'Neutre'}
+        </button>
       </div>
     </div>
   );
 }
 
 function ResultatPanel({ resultat, compact }: { resultat: ResultatCarte; compact?: boolean }) {
+  const couleur = COULEUR_CONDITION[resultat.condition];
+  const estVide = resultat.condition === 'en_attente' || resultat.condition === 'egalite';
   return (
-    <div style={{ padding: compact? 12 : 16, background: '#14171B', color: '#FBF8EF', borderRadius: 6 }}>
-      <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, letterSpacing: '0.14em', textTransform: 'uppercase', opacity: 0.6 }}>Résultat • {resultat.cardId}</div>
-      <div style={{ fontFamily: 'Georgia, serif', fontSize: 20, fontWeight: 700, marginTop: 6 }}>{LIBELLE_CONDITION[resultat.condition]}</div>
-      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>{DESCRIPTION_CONDITION[resultat.condition]}</div>
+    <div style={{ padding: compact ? 12 : 16, background: '#14171B', color: '#FBF8EF', borderRadius: 6 }}>
+      <div
+        style={{
+          fontFamily: 'ui-monospace, monospace',
+          fontSize: 10,
+          letterSpacing: '0.14em',
+          textTransform: 'uppercase',
+          opacity: 0.6,
+        }}
+      >
+        Résultat • {resultat.cardId}
+      </div>
+      <div
+        style={{
+          fontFamily: 'Georgia, serif',
+          fontSize: 20,
+          fontWeight: 700,
+          marginTop: 6,
+          color: estVide ? '#9CA3AF' : couleur,
+        }}
+      >
+        {LIBELLE_CONDITION[resultat.condition]}
+      </div>
+      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
+        {DESCRIPTION_CONDITION[resultat.condition]}
+      </div>
+      {!estVide && (
+        <div
+          style={{
+            display: 'flex',
+            gap: 16,
+            marginTop: 10,
+            fontSize: 11,
+            fontFamily: 'ui-monospace, monospace',
+            opacity: 0.7,
+          }}
+        >
+          <span>
+            <span>JAUNES : </span>
+            <span>{resultat.pointsJaunes}</span>
+            <span> pts</span>
+            {resultat.jetonDonne === 'lucidite' ? <span> + Lucidité</span> : null}
+          </span>
+          <span>
+            <span>ROUGES : </span>
+            <span>{resultat.pointsRouges}</span>
+            <span> pts</span>
+            {resultat.jetonDonne === 'priorite' ? <span> + Priorité</span> : null}
+          </span>
+          {resultat.jetonDonne === 'violet' ? <span>+ Violet ?</span> : null}
+        </div>
+      )}
     </div>
   );
 }
 
 function JoueursList({ joueurs, pions, votes }: any) {
   return (
-    <div style={{ padding: 12, background: '#FBF8EF', borderRadius: 6, border: '1px solid rgba(20,23,27,0.15)' }}>
-      <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.5, marginBottom: 8 }}>Joueurs ({joueurs.length})</div>
+    <div
+      style={{
+        padding: 12,
+        background: '#FBF8EF',
+        borderRadius: 6,
+        border: '1px solid rgba(20,23,27,0.15)',
+      }}
+    >
+      <div
+        style={{
+          fontFamily: 'ui-monospace, monospace',
+          fontSize: 10,
+          letterSpacing: '0.12em',
+          textTransform: 'uppercase',
+          opacity: 0.5,
+          marginBottom: 8,
+        }}
+      >
+        Joueurs ({joueurs.length})
+      </div>
       {joueurs.map((j: Joueur) => {
         const p = pions.find((pp: Pion) => pp.playerId === j.id);
         const v = votes.find((vv: Vote) => vv.playerId === j.id);
+        const qLabel = p ? String(p.quadrantActuel || '—') : '—';
+        const cLabel = p ? String(p.couleur || '—') : '—';
+        const vLabel = v ? String(v.choix) : '';
         return (
-          <div key={j.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 8px', fontSize: 12, borderBottom: '1px solid rgba(20,23,27,0.05)' }}>
+          <div
+            key={j.id}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '6px 8px',
+              fontSize: 12,
+              borderBottom: '1px solid rgba(20,23,27,0.05)',
+            }}
+          >
             <span>{j.nick}</span>
-            <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, opacity: 0.6 }}>{p? p.quadrantActuel : '—'} • {p?.couleur || '—'}{v? ` • ${v.choix}` : ''}</span>
+            <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, opacity: 0.6 }}>
+              <span>{qLabel}</span>
+              <span>{' • '}</span>
+              <span>{cLabel}</span>
+              {vLabel ? <span>{' • '}</span> : null}
+              {vLabel ? <span>{vLabel}</span> : null}
+            </span>
           </div>
         );
       })}
@@ -481,9 +1194,35 @@ function JoueursList({ joueurs, pions, votes }: any) {
 
 function DureeControl({ dureeArgSec, setDureeArgSec }: any) {
   return (
-    <div style={{ padding: 12, background: '#FBF8EF', borderRadius: 6, border: '1px solid rgba(20,23,27,0.15)' }}>
-      <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.5, marginBottom: 8 }}>Durée argumentation : {Math.floor(dureeArgSec / 60)} min</div>
-      <input type="range" min={240} max={360} step={30} value={dureeArgSec} onChange={(e) => setDureeArgSec(parseInt(e.target.value, 10))} style={{ width: '100%' }} />
+    <div
+      style={{
+        padding: 12,
+        background: '#FBF8EF',
+        borderRadius: 6,
+        border: '1px solid rgba(20,23,27,0.15)',
+      }}
+    >
+      <div
+        style={{
+          fontFamily: 'ui-monospace, monospace',
+          fontSize: 10,
+          letterSpacing: '0.12em',
+          textTransform: 'uppercase',
+          opacity: 0.5,
+          marginBottom: 8,
+        }}
+      >
+        Durée argumentation : {Math.floor(dureeArgSec / 60)} min
+      </div>
+      <input
+        type="range"
+        min={240}
+        max={360}
+        step={30}
+        value={dureeArgSec}
+        onChange={(e) => setDureeArgSec(parseInt(e.target.value, 10))}
+        style={{ width: '100%' }}
+      />
     </div>
   );
 }

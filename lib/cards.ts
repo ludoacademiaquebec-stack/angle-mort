@@ -725,6 +725,10 @@ const CARTES_CLI: CarteDiagnostique[] = [
 // CARTES ALL — Alliés en action (01-15)
 // Réservées à la fermeture, jamais en tirage aléatoire
 // ------------------------------------------------------------
+// CARTES ALL — Alliés en action (01-15)
+// Réservées à la fermeture, jamais en tirage aléatoire
+// zoneCible = quadrant visé pour le tirage intelligent v4.0
+// ------------------------------------------------------------
 export const CARTES_ALL: CarteAll[] = [
   {
     id: 'ALL-01',
@@ -735,6 +739,7 @@ export const CARTES_ALL: CarteAll[] = [
     delai: 'J+7',
     niveau: 1,
     couleur: '#123024',
+    zoneCible: 'NO',
   },
   {
     id: 'ALL-02',
@@ -745,6 +750,7 @@ export const CARTES_ALL: CarteAll[] = [
     delai: 'J+14',
     niveau: 1,
     couleur: '#123024',
+    zoneCible: 'SO',
   },
   {
     id: 'ALL-03',
@@ -755,6 +761,7 @@ export const CARTES_ALL: CarteAll[] = [
     delai: 'J+14',
     niveau: 1,
     couleur: '#123024',
+    zoneCible: 'SE',
   },
   {
     id: 'ALL-04',
@@ -765,6 +772,7 @@ export const CARTES_ALL: CarteAll[] = [
     delai: 'J+14',
     niveau: 1,
     couleur: '#123024',
+    zoneCible: 'SO',
   },
   {
     id: 'ALL-05',
@@ -775,6 +783,7 @@ export const CARTES_ALL: CarteAll[] = [
     delai: 'J+7',
     niveau: 1,
     couleur: '#123024',
+    zoneCible: 'NE',
   },
   {
     id: 'ALL-06',
@@ -785,6 +794,7 @@ export const CARTES_ALL: CarteAll[] = [
     delai: 'J+30',
     niveau: 2,
     couleur: '#123024',
+    zoneCible: 'SO',
   },
   {
     id: 'ALL-07',
@@ -795,6 +805,7 @@ export const CARTES_ALL: CarteAll[] = [
     delai: 'J+30',
     niveau: 2,
     couleur: '#123024',
+    zoneCible: 'SE',
   },
   {
     id: 'ALL-08',
@@ -805,6 +816,7 @@ export const CARTES_ALL: CarteAll[] = [
     delai: 'J+30',
     niveau: 2,
     couleur: '#123024',
+    zoneCible: 'SO',
   },
   {
     id: 'ALL-09',
@@ -815,6 +827,7 @@ export const CARTES_ALL: CarteAll[] = [
     delai: 'J+30',
     niveau: 2,
     couleur: '#123024',
+    zoneCible: 'NE',
   },
   {
     id: 'ALL-10',
@@ -825,6 +838,7 @@ export const CARTES_ALL: CarteAll[] = [
     delai: 'J+30',
     niveau: 2,
     couleur: '#123024',
+    zoneCible: 'SO',
   },
   {
     id: 'ALL-11',
@@ -835,6 +849,7 @@ export const CARTES_ALL: CarteAll[] = [
     delai: 'J+90',
     niveau: 3,
     couleur: '#123024',
+    zoneCible: 'SO',
   },
   {
     id: 'ALL-12',
@@ -845,6 +860,7 @@ export const CARTES_ALL: CarteAll[] = [
     delai: 'J+90',
     niveau: 3,
     couleur: '#123024',
+    zoneCible: 'NE',
   },
   {
     id: 'ALL-13',
@@ -855,6 +871,7 @@ export const CARTES_ALL: CarteAll[] = [
     delai: 'J+60',
     niveau: 3,
     couleur: '#123024',
+    zoneCible: 'SE',
   },
   {
     id: 'ALL-14',
@@ -865,6 +882,7 @@ export const CARTES_ALL: CarteAll[] = [
     delai: 'J+60',
     niveau: 3,
     couleur: '#123024',
+    zoneCible: 'NO',
   },
   {
     id: 'ALL-15',
@@ -875,6 +893,7 @@ export const CARTES_ALL: CarteAll[] = [
     delai: 'J+90',
     niveau: 3,
     couleur: '#123024',
+    zoneCible: 'ALL',
   },
 ];
 

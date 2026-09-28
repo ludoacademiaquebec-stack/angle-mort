@@ -3,14 +3,18 @@ export const dynamic = 'force-dynamic';
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '../../../lib/supabase-server';
 
+const VERSIONS_VALIDES = ['rapide', 'moyen', 'long', 'complet'];
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { sessionId, company } = body;
+    const { sessionId, company, version } = body;
 
     if (!sessionId) {
       return NextResponse.json({ error: 'sessionId requis' }, { status: 400 });
     }
+
+    const versionFinale = VERSIONS_VALIDES.includes(version) ? version : 'complet';
 
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let code = '';
@@ -24,6 +28,7 @@ export async function POST(req: NextRequest) {
         id: sessionId,
         code,
         company: company || null,
+        version: versionFinale,
         phase: 'cadrage',
         card_idx: -1,
         revealed: 'signal',
@@ -33,7 +38,7 @@ export async function POST(req: NextRequest) {
     );
 
     if (error) throw error;
-    return NextResponse.json({ ok: true, sessionId, code });
+    return NextResponse.json({ ok: true, sessionId, code, version: versionFinale });
   } catch (e: any) {
     console.error('[create-session] Erreur:', e);
     return NextResponse.json({ error: e?.message || 'Erreur serveur' }, { status: 500 });

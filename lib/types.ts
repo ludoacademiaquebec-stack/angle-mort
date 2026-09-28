@@ -1,25 +1,25 @@
 // ============================================================
-// ANGLE MORT v3.3 — Types canoniques
+// ANGLE MORT v4.0 — Types canoniques (production)
 // ============================================================
 
-// ---------- FAMILLES DE CARTES ----------
 export type Famille = 'REC' | 'MIC' | 'PRI' | 'CLI';
 export type FamilleAll = 'ALL';
 export type FamilleTotale = Famille | FamilleAll;
 
-// ---------- QUADRANTS SÉMANTIQUES ----------
 export type Quadrant = 'NO' | 'NE' | 'SO' | 'SE';
-
-// ---------- CANAL DE LA CARTE ----------
 export type Canal = 'signal' | 'situation';
-
-// ---------- COULEUR DU PION (= PARI) ----------
 export type CouleurPion = 'neutre' | 'jaune' | 'rouge';
-
-// ---------- MODE DE SESSION ----------
 export type ModeSession = 'individuel' | 'equipe';
 
-// ---------- PHASES DU PROTOCOLE ----------
+export type Version = 'rapide' | 'moyen' | 'long' | 'complet';
+
+export const VERSION_CONFIG: Record<Version, { nbCartes: number; dureeMin: number; label: string }> = {
+  rapide:  { nbCartes: 15, dureeMin: 25,  label: 'Rapide (15 cartes · 25 min)' },
+  moyen:   { nbCartes: 30, dureeMin: 50,  label: 'Moyen (30 cartes · 50 min)' },
+  long:    { nbCartes: 45, dureeMin: 85,  label: 'Long (45 cartes · 1h25)' },
+  complet: { nbCartes: 60, dureeMin: 120, label: 'Complet (60 cartes · 2h)' },
+};
+
 export type PhaseProtocole =
   | 'cadrage'
   | 'signal'
@@ -29,66 +29,62 @@ export type PhaseProtocole =
   | 'decompte'
   | 'fermeture_all';
 
-// ---------- CONDITION DE RÉSOLUTION (4 cas) ----------
 export type ConditionResolution =
-  | 'coherence_confirmee'   // Jaune gagne : position identique
-  | 'revelation_confirmee'  // Rouge gagne : position différente
-  | 'fausse_alerte'         // Rouge perd : position identique
-  | 'angle_mort_aveugle';   // Jaune perd : position différente
+  | 'coherence_confirmee'
+  | 'revelation_confirmee'
+  | 'fausse_alerte'
+  | 'angle_mort_aveugle'
+  | 'egalite'
+  | 'en_attente';
 
-// ---------- CARTE DIAGNOSTIQUE (60) ----------
+export type JetonGagne = 'violet' | 'priorite' | 'lucidite' | null;
+
 export interface CarteDiagnostique {
-  id: string;                    // 'REC-01' ... 'CLI-15'
+  id: string;
   famille: Famille;
   titre: string;
-  image: string;                 // description de la scène (pour l'illustration)
-  signal: string;                // face Signal (pointillé)
-  situation: string;             // face Situation (plein)
-  question: string;              // question d'animation
-  motPiege?: string;             // citation-piège (optionnel)
-  compteur?: string;             // '72%', '11/12', etc. (optionnel)
-  compteurLabel?: string;        // description du compteur
-  extra?: {
-    type: 'effet' | 'cout';
-    texte: string;
-  };
+  image: string;
+  signal: string;
+  situation: string;
+  question: string;
+  motPiege?: string;
+  compteur?: string;
+  compteurLabel?: string;
+  extra?: { type: 'effet' | 'cout'; texte: string };
 }
 
-// ---------- CARTE ALL (15) ----------
 export interface CarteAll {
-  id: string;                    // 'ALL-01' ... 'ALL-15'
+  id: string;
   famille: 'ALL';
   titre: string;
   action: string;
-  indicateur: string;            // '3 reformulations / semaine'
-  delai: string;                 // 'J+7', 'J+30', 'J+90'
+  indicateur: string;
+  delai: string;
   niveau: 1 | 2 | 3;
-  couleur: string;               // '#123024'
+  couleur: string;
+  zoneCible?: Quadrant | 'ALL';
 }
 
-// ---------- PION (1 par joueur) ----------
 export interface Pion {
   playerId: string;
   nick: string;
-  quadrantInitial: Quadrant | null;   // où il était en fin de Phase 1
-  quadrantActuel: Quadrant | null;    // où il est maintenant
-  couleur: CouleurPion;               // calculée à la fin de Phase 2
-  equipeId?: string;                  // si mode équipe
+  quadrantInitial: Quadrant | null;
+  quadrantActuel: Quadrant | null;
+  couleur: CouleurPion;
+  equipeId?: string;
 }
 
-// ---------- JOUEUR ----------
 export interface Joueur {
   id: string;
   sessionId: string;
   nick: string;
-  equipeId?: string;                  // si mode équipe
-  cartesQuestion: number;             // compteur de cartes Question gagnées
-  cartesMesure: number;               // compteur de cartes Mesure gagnées
+  equipeId?: string;
+  cartesQuestion: number;
+  cartesMesure: number;
   lastSeenAt: number;
   connected: boolean;
 }
 
-// ---------- VOTE D'UN JOUEUR ----------
 export interface Vote {
   playerId: string;
   nick?: string;
@@ -100,46 +96,59 @@ export interface Vote {
   sessionId?: string;
 }
 
-// ---------- RÉSULTAT D'UNE CARTE ----------
 export interface ResultatCarte {
   cardId: string;
-  positionSignal: Quadrant;           // position majoritaire avant Situation
-  positionFinale: Quadrant;           // position majoritaire après vote
+  famille?: Famille;
+  positionSignal: Quadrant;
+  positionFinale: Quadrant;
   pariGagnant: 'jaune' | 'rouge';
   condition: ConditionResolution;
-  gagnants: string[];                 // playerIds
-  perdants: string[];                 // playerIds
+  gagnants: string[];
+  perdants: string[];
+  pointsJaunes: number;
+  pointsRouges: number;
+  jetonDonne: JetonGagne;
   timestamp: number;
- reste?: number;
+  reste?: number;
   bouge?: number;
   neutre?: number;
- majorite?: 'reste' | 'bouge' | 'neutre' | 'egalite';
+  majorite?: 'reste' | 'bouge' | 'neutre' | 'egalite';
 }
 
-// ---------- SESSION (état complet) ----------
+export interface Engagement {
+  id?: string;
+  sessionId: string;
+  playerId: string;
+  allCardId: string;
+  engagementText: string;
+  indicateur: string;
+  echeance: string;
+  createdAt?: number;
+}
+
 export interface SessionState {
   sessionId: string;
   code: string;
   company: string;
   mode: ModeSession;
-  nbEquipes: number;                  // si mode équipe
-  dureeArgumentationSec: number;      // 240 à 360 (4-6 min)
+  version: Version;
+  nbEquipes: number;
+  dureeArgumentationSec: number;
   phase: PhaseProtocole;
-  cardIdxEnCours: number;             // index dans la liste des cartes tirées (-1 si aucune)
-  cartesTirees: string[];             // ids des cartes dans l'ordre de tirage
-  pions: Pion[];                      // 1 par joueur
-  votes: Vote[];                      // votes de la carte en cours
+  cardIdxEnCours: number;
+  cartesTirees: string[];
+  pions: Pion[];
+  votes: Vote[];
   resultatCarte: ResultatCarte | null;
   cartesQuestionTotales: number;
   cartesMesureTotales: number;
-  allSelectionnees: string[];         // 3 cartes ALL choisies en fermeture
-  engagementRetenu: string | null;    // l'engagement 48h unique
+  allSelectionnees: string[];
+  engagementRetenu: string | null;
   startedAt: number;
   updatedAt: number;
   status: 'active' | 'paused' | 'closed';
 }
 
-// ---------- ÉTAT LOCAL DU JOUEUR ----------
 export interface LocalPlayerState {
   playerId: string;
   nick: string;
@@ -150,11 +159,11 @@ export interface LocalPlayerState {
   cartesMesure: number;
 }
 
-// ---------- CONFIGURATION D'UNE NOUVELLE SESSION ----------
 export interface SessionConfig {
   sessionId: string;
   company: string;
   mode: ModeSession;
+  version: Version;
   nbEquipes?: number;
   dureeArgumentationSec: number;
 }
