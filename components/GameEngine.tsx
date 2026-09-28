@@ -1,154 +1,145 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { supabase } from '@/lib/supabase';
+import { loadCardsDiagFromDB, loadCardsAllFromDB } from '@/lib/cards';
+import { compterVotes, construireResultat, positionMajoritaire } from '@/lib/resolution';
 import { savePari } from '@/lib/session-api';
+import type { Quadrant, Pion, Vote, ResultatCarte } from '@/lib/types';
 
-type Props = { sessionId: string; code: string; isFacilitator?: boolean };
+type Phase = 'signal' | 'situation' | 'question' | 'argumentation' | 'vote' | 'decompte' | 'resultat' | 'fermeture_all' | 'fermeture';
+const QUADRANTS: Quadrant[] = ['NO','NE','SO','SE'];
 
-export default function GameEngine({ sessionId, code, isFacilitator=false }: Props){
-  const [phase, setPhase] = useState<'diag'|'vote'|'result'|'all'|'engagement'|'fini'>('diag');
+function GameEngine({ sessionId, code, isFacilitator = false, playerId, nick, sync }: any) {
+  const [pions, setPions] = useState<Pion[]>([]);
+  const [votes, setVotes] = useState<Vote[]>([]);
   const [cartesDiag, setCartesDiag] = useState<any[]>([]);
   const [cartesAll, setCartesAll] = useState<any[]>([]);
-  const [index, setIndex] = useState(0);
-  const [votes, setVotes] = useState<Record<string, {reste:number, bouge:number, neutre:number}>>({});
-  const [jetons, setJetons] = useState(0);
-  const [scoreR, setScoreR] = useState(0);
-  const [scoreB, setScoreB] = useState(0);
-  const [scoreN, setScoreN] = useState(0);
-  const [pions, setPions] = useState<any[]>([]);
-  const [selectedAll, setSelectedAll] = useState<string[]>([]);
+  const [cardIdx, setCardIdx] = useState(0);
+  const [phase, setPhase] = useState<Phase>('signal');
+  const [resultat, setResultat] = useState<ResultatCarte | null>(null);
+  const [allTirees, setAllTirees] = useState<any[]>([]);
+  const [timer, setTimer] = useState(300);
+
+  const carte = cartesDiag[cardIdx];
+
+  useEffect(()=>{ loadCardsDiagFromDB().then(setCartesDiag); loadCardsAllFromDB().then(setCartesAll); },[]);
 
   useEffect(()=>{
-    (async()=>{
-      const { data: d1 } = await supabase.from('cards_diag').select('*').order('ordre',{ascending:true});
-      const { data: d2 } = await supabase.from('cards_all').select('*').order('ordre',{ascending:true}).limit(12);
-      setCartesDiag(d1||[]);
-      setCartesAll(d2||[]);
-      const { data: pi } = await supabase.from('session_pions').select('*').eq('session_id', sessionId);
-      setPions(pi||[]);
-    })();
+    if(!sessionId) return;
+    const fetchPions = async ()=>{ const {data}=await supabase.from('session_pions').select('*').eq('session_id', sessionId); if(data) setPions(data as any); };
+    const fetchVotes = async ()=>{
+      const {data}=await supabase.from('session_events').select('*').eq('session_id', sessionId).eq('type','pari').order('created_at',{ascending:true});
+      if(data){
+        const v: Vote[] = data.map((e:any)=>({ playerId: e.player_id, choix: e.to_quadrant as any, cardId: e.question_id || e.metadata?.cardId || e.metadata?.question_id, question_id: e.question_id, timestamp: new Date(e.created_at).getTime(), sessionId }));
+        setVotes(v);
+      }
+    };
+    fetchPions(); fetchVotes();
+    const ch = supabase.channel(`sess-${sessionId}`)
+     .on('postgres_changes',{event:'*',schema:'public',table:'session_pions',filter:`session_id=eq.${sessionId}`}, fetchPions)
+     .on('postgres_changes',{event:'*',schema:'public',table:'session_events',filter:`session_id=eq.${sessionId}`}, fetchVotes)
+     .subscribe();
+    return ()=>{ supabase.removeChannel(ch); };
   },[sessionId]);
 
-  const carteActuelle = cartesDiag[index];
+  useEffect(()=>{ if(phase!=='argumentation') return; const id=setInterval(()=> setTimer(t=>Math.max(0,t-1)),1000); return ()=>clearInterval(id); },[phase]);
 
-  const voter = async (choix:'reste'|'bouge'|'neutre')=>{
-    if(!carteActuelle) return;
-    // sauvegarde pari associé à la carte
-    await savePari(sessionId, 'player-local', 'local', carteActuelle.id, choix);
+  // VOTES DE CETTE CARTE UNIQUEMENT
+  const votesDeLaCarte = useMemo(()=> votes.filter(v=> v.cardId===carte?.id), [votes, carte]);
+  const counts = useMemo(()=> compterVotes(votesDeLaCarte as any), [votesDeLaCarte]);
 
-    // mise à jour locale votes
-    setVotes(prev=>{
-      const cur = prev[carteActuelle.id]||{reste:0,bouge:0,neutre:0};
-      return {...prev, [carteActuelle.id]: {...cur, [choix]: (cur as any)[choix]+1}};
-    });
-    if(choix==='reste') setScoreR(s=>s+1);
-    if(choix==='bouge') setScoreB(s=>s+1);
-    if(choix==='neutre') setScoreN(s=>s+1);
-
-    // calcul jetons : 1 jeton si pari gagnant (majorité), bonus si neutre
-    // on simplifie : 1 jeton par vote, +1 si neutre (hésitation = révélation)
-    setJetons(j=> j + (choix==='neutre'? 2 : 1));
-
-    // enregistre resultat
-    await supabase.from('session_resultats').upsert({
-      session_id: sessionId,
-      card_id: carteActuelle.id,
-      card_index: index,
-      votes_reste: choix==='reste'?1:0,
-      votes_bouge: choix==='bouge'?1:0,
-      votes_neutre: choix==='neutre'?1:0,
-      updated_at: new Date().toISOString()
-    } as any, {onConflict:'session_id,card_id'});
-
-    // passe à carte suivante ou phase ALL
-    if(index < cartesDiag.length-1){
-      setIndex(i=>i+1);
-      setPhase('diag');
-    } else {
-      // FIN DIAG -> ALL
-      await supabase.from('sessions').update({ phase:'all', jetons_total: jetons+1 } as any).eq('id', sessionId);
-      setPhase('all');
-    }
+  const logEvent = async (payload:any)=>{
+    try{ await supabase.from('session_events').insert({ session_id: sessionId, type: payload.type, to_quadrant: payload.to_quadrant, question_id: payload.question_id, player_id: playerId||null, metadata: payload.metadata||{} }); }catch{}
   };
 
-  const choisirALL = async (cardAllId:string)=>{
-    if(selectedAll.includes(cardAllId)) return;
-    const newSel = [...selectedAll, cardAllId];
-    setSelectedAll(newSel);
-    await supabase.from('session_depots').insert({
-      session_id: sessionId,
-      card_id: cardAllId,
-      type: 'engagement_all',
-      created_at: new Date().toISOString()
-    } as any);
-    // Si 3 engagements ou jetons épuisés -> fini
-    if(newSel.length>=3 || newSel.length>=Math.min(jetons,5)){
-      await supabase.from('sessions').update({ phase:'fini', status:'completed' } as any).eq('id', sessionId);
-      setPhase('fini');
-    }
+  const handleVote = async (choix: 'reste'|'bouge'|'neutre')=>{
+    if(!carte) return;
+    const pid = playerId||'anon';
+    const newVote: Vote = { playerId: pid, choix, cardId: carte.id, question_id: carte.id, timestamp: Date.now(), sessionId };
+    // Remplace vote précédent du même joueur sur CETTE carte
+    setVotes(prev=> [...prev.filter(v=>!(v.playerId===pid && v.cardId===carte.id)), newVote]);
+    try{ sync?.sendVote?.(newVote); }catch{}
+    await savePari(sessionId, pid, nick||'Joueur', carte.id, choix);
+    await logEvent({ type:'pari', to_quadrant: choix, question_id: carte.id, metadata:{ choix, cardId: carte.id, question_id: carte.id, mon_quadrant: pions.find(p=>p.playerId===pid)?.quadrantActuel } });
   };
 
-  if(!carteActuelle && phase==='diag') return <div style={{padding:40}}>Chargement cartes DIAG...</div>;
+  const handleDecompte = ()=>{
+    if(!carte) return;
+    const res = construireResultat(carte.id, pions, votesDeLaCarte as any);
+    setResultat(res);
+    setPhase('resultat');
+    logEvent({ type:'resultat', question_id: carte.id, metadata: res as any });
+    supabase.from('session_resultats').insert({ session_id: sessionId, card_id: carte.id, card_index: cardIdx, position_signal: res.positionSignal, position_finale: res.positionFinale, pari_gagnant: res.pariGagnant, condition: res.condition, reste: (res as any).reste, bouge: (res as any).bouge, neutre: (res as any).neutre, majorite: res.majorite, gagnants: res.gagnants, perdants: res.perdants }).then(()=>{});
+  };
+
+  const tirerAll = ()=>{
+    const n1 = cartesAll.filter(c=>c.niveau===1); const n2 = cartesAll.filter(c=>c.niveau===2); const n3 = cartesAll.filter(c=>c.niveau===3);
+    const pick = (arr:any[])=> arr.length? arr[Math.floor(Math.random()*arr.length)] : null;
+    const tirees = [pick(n1), pick(n2), pick(n3)].filter(Boolean);
+    setAllTirees(tirees); setPhase('fermeture_all');
+    logEvent({ type:'phase', to_quadrant: 'fermeture_all' as any, question_id: carte?.id, metadata:{ all: tirees.map((c:any)=>c.id) } });
+  };
+
+  if(!carte) return <div style={{padding:40}}>Chargement {cartesDiag.length} cartes diag / {cartesAll.length} ALL...</div>;
+  const posSig = positionMajoritaire(pions, 'quadrantInitial'); const posFin = positionMajoritaire(pions, 'quadrantActuel');
 
   return (
-    <div style={{ minHeight:'100vh', background:'#FFFEF9', color:'#14171B' }}>
-      <header style={{ padding:'12px 20px', borderBottom:'1px solid #eee', display:'flex', justifyContent:'space-between', background:'#FFF' }}>
-        <div style={{ fontFamily:'monospace', fontSize:12 }}>{code} • {sessionId.slice(0,8)} • Phase {phase.toUpperCase()} • Jetons {jetons} • R:{scoreR} B:{scoreB} N:{scoreN}</div>
-        <div style={{ fontSize:11 }}>Carte {index+1}/{cartesDiag.length} DIAG {phase==='all'? `+ ${selectedAll.length} ALL choisis`:''}</div>
-      </header>
-
-      {phase==='diag' && carteActuelle && (
-        <div style={{ maxWidth:900, margin:'0 auto', padding:24 }}>
-          <div style={{ background:'#FFF', border:'2px solid #14171B', borderRadius:16, padding:20 }}>
-            <div style={{ fontSize:10, fontFamily:'monospace', opacity:0.6 }}>{carteActuelle.id} • {carteActuelle.famille} • {carteActuelle.couleur} • {carteActuelle.compteur_label||carteActuelle.compteur}</div>
-            <h2 style={{ fontFamily:'Georgia, serif', fontSize:26, margin:'8px 0' }}>{carteActuelle.titre}</h2>
-            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginTop:12 }}>
-              <div style={{ background:'#FFFEF9', border:'1px solid #eee', borderRadius:8, padding:12 }}><div style={{fontSize:10, fontWeight:800}}>SIGNAL</div><div style={{marginTop:6}}>{carteActuelle.signal}</div></div>
-              <div style={{ background:'#F9FAFB', border:'1px solid #eee', borderRadius:8, padding:12 }}><div style={{fontSize:10, fontWeight:800}}>SITUATION</div><div style={{marginTop:6, fontSize:13}}>{carteActuelle.situation}</div></div>
-              <div style={{ gridColumn:'1 / span 2', border:'2px solid #14171B', borderRadius:10, padding:14 }}><div style={{fontSize:10, fontWeight:800}}>QUESTION (associée au vote)</div><div style={{marginTop:6, fontWeight:700, fontSize:16}}>{carteActuelle.question}</div></div>
+    <div style={{ minHeight:'100vh', background:'#FFFEF9', padding:16 }}>
+      <div style={{ maxWidth:1300, margin:'0 auto' }}>
+        <div style={{ display:'flex', justifyContent:'space-between', background:'#FFF', border:'1px solid #14171B', borderRadius:8, padding:'10px 16px', marginBottom:12 }}>
+          <div style={{fontWeight:800}}>{code} • Carte {cardIdx+1}/{cartesDiag.length} • {carte.id}</div>
+          <div style={{fontSize:12, display:'flex', gap:12}}><span>Phase:{phase}</span><span style={{padding:'2px 10px', background:'#14171B', color:'#FFF', borderRadius:20}}>R:{counts.reste} B:{counts.bouge} N:{counts.neutre} → {counts.majorite}</span></div>
+        </div>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 340px', gap:16 }}>
+          <div>
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gridTemplateRows:'1fr 1fr', gap:8, height:420, marginBottom:12 }}>
+              {QUADRANTS.map(q=>(
+                <div key={q} style={{ border:`2px solid ${posSig===q?'#FDE047':'#14171B'}`, borderRadius:10, padding:10, background: posFin===q?'#f9fafb':'#FFF' }}>
+                  <div style={{fontSize:11, fontWeight:800}}>{q} {posSig===q?'• SIGNAL':''} {posFin===q?'• FINALE':''}</div>
+                  <div style={{display:'flex', flexWrap:'wrap', gap:6, marginTop:8}}>{pions.filter(p=> (phase==='signal'? p.quadrantInitial : p.quadrantActuel)===q).map(p=><div key={p.playerId} style={{width:28,height:28,borderRadius:14,background:p.couleur==='jaune'?'#FDE047':p.couleur==='rouge'?'#EF4444':'#E5E7EB',border:'1px solid #14171B',display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:800}}>{p.playerId.slice(0,2).toUpperCase()}</div>)}</div>
+                </div>
+              ))}
             </div>
-            <div style={{ display:'flex', gap:12, marginTop:20 }}>
-              <button onClick={()=>voter('reste')} style={{ flex:1, padding:'14px', background:'#FDE047', border:'2px solid #14171B', borderRadius:10, fontWeight:800 }}>RESTE (jaune)</button>
-              <button onClick={()=>voter('bouge')} style={{ flex:1, padding:'14px', background:'#EF4444', color:'#FFF', border:'2px solid #14171B', borderRadius:10, fontWeight:800 }}>BOUGE (rouge)</button>
-              <button onClick={()=>voter('neutre')} style={{ flex:1, padding:'14px', background:'#E5E7EB', border:'2px dashed #14171B', borderRadius:10, fontWeight:800 }}>NEUTRE (gris) +2 jetons</button>
+            <div style={{ background:'#FFF', border:'1px solid #14171B', borderRadius:12, padding:16 }}>
+              {phase==='signal' && <><h2>{carte.signal}</h2><div>{carte.situation}</div><button onClick={()=>setPhase('question')} style={{marginTop:12,padding:'10px 20px',background:'#14171B',color:'#FFF',borderRadius:6}}>Question</button></>}
+              {phase==='question' && <><h2>{carte.question}</h2><button onClick={()=>{setPhase('argumentation'); setTimer(300);}} style={{marginTop:12,padding:'10px 20px',background:'#14171B',color:'#FFF',borderRadius:6}}>Argumentation 5min</button></>}
+              {phase==='argumentation' && <><h2>Argumentation {Math.floor(timer/60)}:{String(timer%60).padStart(2,'0')}</h2><button onClick={()=>setPhase('vote')} style={{marginTop:12,padding:'10px 20px',background:'#FDE047',border:'1px solid #14171B',borderRadius:6,fontWeight:700}}>Passer au vote — Carte {carte.id}</button></>}
+              {phase==='vote' && (
+                <div>
+                  <h2>Vote pour {carte.id} — Reste ou Bouge?</h2>
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10,marginTop:16}}>
+                    <button onClick={()=>handleVote('reste')} style={{padding:18,background:'#FDE047',border:'2px solid #14171B',borderRadius:10,fontWeight:800}}>RESTE</button>
+                    <button onClick={()=>handleVote('bouge')} style={{padding:18,background:'#EF4444',color:'#FFF',border:'2px solid #14171B',borderRadius:10,fontWeight:800}}>BOUGE</button>
+                    <button onClick={()=>handleVote('neutre')} style={{padding:18,background:'#E5E7EB',border:'2px solid #14171B',borderRadius:10,fontWeight:800}}>NEUTRE</button>
+                  </div>
+                  <div style={{marginTop:12,fontSize:12}}>Vote associé à: <b>{carte.id}</b> • Joueur: {playerId||'anon'} • {votesDeLaCarte.length} votes sur cette carte</div>
+                  {isFacilitator && <button onClick={handleDecompte} style={{marginTop:16,padding:'10px 20px',background:'#14171B',color:'#FFF',borderRadius:6}}>Décompte {carte.id} → R:{counts.reste} B:{counts.bouge} N:{counts.neutre}</button>}
+                </div>
+              )}
+              {phase==='resultat' && resultat && (
+                <div>
+                  <h2>Résultat {carte.id} — {resultat.condition} — Majorité {resultat.majorite}</h2>
+                  <div style={{display:'flex',height:22,borderRadius:8,overflow:'hidden',border:'1px solid #14171B',margin:'12px 0'}}>
+                    {(()=>{ const tot=(resultat as any).reste+(resultat as any).bouge+(resultat as any).neutre||1; const pr=Math.round((resultat as any).reste/tot*100); const pb=Math.round((resultat as any).bouge/tot*100); const pn=100-pr-pb; return <><div style={{width:`${pr}%`,background:'#FDE047',display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,fontWeight:700}}>{pr>10?`R ${pr}%`:''}</div><div style={{width:`${pb}%`,background:'#EF4444',color:'#FFF',display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,fontWeight:700}}>{pb>10?`B ${pb}%`:''}</div><div style={{width:`${pn}%`,background:'#E5E7EB',display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,fontWeight:700}}>{pn>10?`N ${pn}%`:''}</div></>; })()}
+                  </div>
+                  <div style={{display:'flex',gap:8}}><button onClick={tirerAll} style={{padding:'12px 20px',background:'#14171B',color:'#FFF',borderRadius:6,fontWeight:700}}>Plan ALL 1/2/3</button><button onClick={()=>{ if(cardIdx<cartesDiag.length-1){ setCardIdx(i=>i+1); setPhase('signal'); setResultat(null); } else setPhase('fermeture_all'); }} style={{padding:'12px 20px',background:'#FFF',border:'1px solid #14171B',borderRadius:6}}>Carte suivante</button></div>
+                </div>
+              )}
+              {phase==='fermeture_all' && (
+                <div><h2>Plan d'action ALL — 3 cartes</h2><div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12,marginTop:12}}>{allTirees.map((c:any)=><div key={c.id} style={{border:`2px solid ${c.couleur||'#14171B'}`,borderRadius:10,padding:14}}><div style={{fontSize:10,fontFamily:'monospace'}}>{c.id} N{c.niveau} {c.delai}</div><div style={{fontWeight:800,margin:'6px 0'}}>{c.titre}</div><div style={{fontSize:12}}>{c.action}</div><div style={{fontSize:10,opacity:0.6,marginTop:6}}>{c.indicateur}</div></div>)}</div><a href={`/rapport-profond?sessionId=${sessionId}`} style={{display:'inline-block',marginTop:20,padding:'12px 24px',background:'#14171B',color:'#FFF',borderRadius:6,textDecoration:'none'}}>Rapport profond avec neutre →</a></div>
+              )}
             </div>
-            <div style={{ marginTop:12, fontSize:11, opacity:0.6 }}>Vote associé à {carteActuelle.id} • jetons actuels {jetons} • ce vote débloquera les cartes ALL à la fin du DIAG</div>
+          </div>
+          <div style={{ background:'#FFF', border:'1px solid #14171B', borderRadius:12, padding:12 }}>
+            <div style={{fontSize:11,fontWeight:700,marginBottom:8}}>VOTES CARTE {carte.id} — {votesDeLaCarte.length}/{pions.length||'?'} joueurs</div>
+            <div style={{display:'flex',height:14,borderRadius:6,overflow:'hidden',border:'1px solid #14171B',marginBottom:8}}>{(()=>{ const tot=counts.reste+counts.bouge+counts.neutre||1; return <><div style={{width:`${counts.reste/tot*100}%`,background:'#FDE047'}}/><div style={{width:`${counts.bouge/tot*100}%`,background:'#EF4444'}}/><div style={{width:`${counts.neutre/tot*100}%`,background:'#E5E7EB'}}/></>; })()}</div>
+            <div style={{fontSize:12,display:'flex',justifyContent:'space-between'}}><span>R:{counts.reste}</span><span>B:{counts.bouge}</span><span>N:{counts.neutre}</span><span><b>{counts.majorite}</b></span></div>
+            <div style={{marginTop:10,fontSize:11,maxHeight:300,overflowY:'auto'}}>{votesDeLaCarte.map((v,i)=><div key={i} style={{display:'flex',justifyContent:'space-between',borderBottom:'1px solid #f5f5f5',padding:'4px 0'}}><span>{v.playerId.slice(0,6)} → {v.cardId}</span><span style={{padding:'1px 8px',borderRadius:10,background:v.choix==='reste'?'#FDE047':v.choix==='bouge'?'#EF4444':'#E5E7EB',color:v.choix==='bouge'?'#FFF':'#14171B',fontWeight:700,fontSize:10}}>{v.choix}</span></div>)}</div>
           </div>
         </div>
-      )}
-
-      {phase==='all' && (
-        <div style={{ maxWidth:1100, margin:'0 auto', padding:24 }}>
-          <div style={{ background:'#14171B', color:'#FFF', borderRadius:16, padding:20, marginBottom:20 }}>
-            <h2 style={{ fontFamily:'Georgia, serif', fontSize:28 }}>Phase ACTION — Cartes ALL</h2>
-            <div style={{ marginTop:8, fontSize:13, opacity:0.8 }}>Vous avez obtenu {jetons} jetons (R:{scoreR} B:{scoreB} N:{scoreN} — neutre = 2 jetons). Selon les scores et les jetons, choisissez vos engagements.</div>
-            <div style={{ marginTop:12, display:'flex', gap:8 }}>{Array.from({length:jetons}).map((_,i)=><div key={i} style={{ width:24, height:24, borderRadius:12, background:'#FDE047', border:'1px solid #FFF' }} />)}</div>
-          </div>
-          <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:16 }}>
-            {cartesAll.map((c:any)=>(
-              <div key={c.id} style={{ background:'#FFF', border: selectedAll.includes(c.id)? '3px solid #14171B':'1px solid #14171B', borderRadius:12, padding:16, opacity: selectedAll.includes(c.id)? 0.6:1 }}>
-                <div style={{ fontSize:10, fontFamily:'monospace' }}>{c.id} • Niveau {c.niveau} • Délai {c.delai} • {c.couleur}</div>
-                <div style={{ fontWeight:800, marginTop:6, fontSize:15 }}>{c.titre}</div>
-                <div style={{ fontSize:13, marginTop:8 }}>{c.action}</div>
-                <div style={{ fontSize:11, marginTop:8, opacity:0.6 }}>Indicateur: {c.indicateur}</div>
-                <button disabled={selectedAll.includes(c.id)} onClick={()=> choisirALL(c.id)} style={{ marginTop:12, width:'100%', padding:'10px', background: selectedAll.includes(c.id)? '#E5E7EB':'#14171B', color: selectedAll.includes(c.id)? '#14171B':'#FFF', borderRadius:8, fontWeight:700, cursor: selectedAll.includes(c.id)? 'not-allowed':'pointer' }}>{selectedAll.includes(c.id)? 'Engagé ✓':'S’engager — coûte 1 jeton'}</button>
-              </div>
-            ))}
-          </div>
-          <div style={{ marginTop:20, textAlign:'center' }}><button onClick={()=> setPhase('fini')} style={{ padding:'12px 24px', background:'#FDE047', border:'2px solid #14171B', borderRadius:8, fontWeight:800 }}>Terminer → Voir rapport profond complet</button></div>
-        </div>
-      )}
-
-      {phase==='fini' && (
-        <div style={{ maxWidth:800, margin:'0 auto', padding:40, textAlign:'center' }}>
-          <h1 style={{ fontFamily:'Georgia, serif', fontSize:32 }}>Partie terminée</h1>
-          <div style={{ marginTop:12 }}>Jetons {jetons} • R:{scoreR} B:{scoreB} N:{scoreN} • {selectedAll.length} actions choisies</div>
-          <div style={{ marginTop:20, display:'flex', gap:12, justifyContent:'center' }}>
-            <a href={`/rapport-profond?sessionId=${sessionId}`} style={{ padding:'12px 20px', background:'#14171B', color:'#FFF', borderRadius:8, textDecoration:'none', fontWeight:700 }}>Voir rapport profond complet (entreprise, date, joueurs, cartes, révélations)</a>
-            <a href={`/rapport/${sessionId}`} style={{ padding:'12px 20px', background:'#FDE047', border:'1px solid #14171B', borderRadius:8, textDecoration:'none', color:'#14171B', fontWeight:700 }}>Rapport court</a>
-          </div>
-        </div>
-      )}
+      </div>
     </div>
-  )
+  );
 }
+export { GameEngine };
+export default GameEngine;
