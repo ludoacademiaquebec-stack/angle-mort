@@ -91,6 +91,7 @@ export interface Joueur {
 // ---------- VOTE D'UN JOUEUR ----------
 export interface Vote {
   playerId: string;
+  nick?: string;
   choix: 'reste' | 'bouge' | 'neutre';
   cardId: string;
   question_id?: string;
