@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { GameEngine } from '../../../components/GameEngine';
+import GameEngine from '../../../components/GameEngine';
 import type { Joueur } from '../../../lib/types';
 import { supabase } from '@/lib/supabase';
 
