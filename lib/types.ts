@@ -1,5 +1,6 @@
 // ============================================================
-// ANGLE MORT v4.0 — Types canoniques (production)
+// ANGLE MORT v4.1 — Types canoniques (production)
+// Ajout : phase 'reaction' + TimerState
 // ============================================================
 
 export type Famille = 'REC' | 'MIC' | 'PRI' | 'CLI';
@@ -20,10 +21,21 @@ export const VERSION_CONFIG: Record<Version, { nbCartes: number; dureeMin: numbe
   complet: { nbCartes: 60, dureeMin: 120, label: 'Complet (60 cartes · 2h)' },
 };
 
+// ============================================================
+// PHASES DU PROTOCOLE
+// signal      : dépôt intuition (pion neutre)
+// situation   : 30-45 sec de lecture seule
+// reaction    : "veux-tu déplacer ton pion ?" — choix définitif
+// argumentation : 2 questions à l'oral
+// vote        : choix définitif du cadran
+// decompte    : résultat révélé
+// fermeture_all : 3 cartes ALL
+// ============================================================
 export type PhaseProtocole =
   | 'cadrage'
   | 'signal'
   | 'situation'
+  | 'reaction'
   | 'argumentation'
   | 'vote'
   | 'decompte'
@@ -72,6 +84,7 @@ export interface Pion {
   quadrantActuel: Quadrant | null;
   couleur: CouleurPion;
   equipeId?: string;
+  reactionFaite?: boolean;
 }
 
 export interface Joueur {
@@ -94,6 +107,23 @@ export interface Vote {
   questionId?: string;
   timestamp: number;
   sessionId?: string;
+}
+
+export interface Reaction {
+  playerId: string;
+  nick: string;
+  choix: 'deplace' | 'reste' | 'neutre';
+  nouveauQuadrant?: Quadrant;
+  timestamp: number;
+}
+
+export interface ReponseArgumentation {
+  playerId: string;
+  nick: string;
+  question1: string;
+  question2: string;
+  estPassee: boolean;
+  timestamp: number;
 }
 
 export interface ResultatCarte {
@@ -126,6 +156,12 @@ export interface Engagement {
   createdAt?: number;
 }
 
+export interface TimerState {
+  elapsedSec: number;
+  running: boolean;
+  startedAt: string | null;
+}
+
 export interface SessionState {
   sessionId: string;
   code: string;
@@ -139,11 +175,14 @@ export interface SessionState {
   cartesTirees: string[];
   pions: Pion[];
   votes: Vote[];
+  reactions: Reaction[];
+  reponsesArgumentation: ReponseArgumentation[];
   resultatCarte: ResultatCarte | null;
   cartesQuestionTotales: number;
   cartesMesureTotales: number;
   allSelectionnees: string[];
   engagementRetenu: string | null;
+  timer: TimerState;
   startedAt: number;
   updatedAt: number;
   status: 'active' | 'paused' | 'closed';

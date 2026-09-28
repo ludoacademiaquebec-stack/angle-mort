@@ -56,6 +56,7 @@ const PHASES_ORDER: PhaseProtocole[] = [
   'cadrage',
   'signal',
   'situation',
+'reaction',
   'argumentation',
   'vote',
   'decompte',
@@ -66,6 +67,7 @@ const PHASE_LABEL: Record<PhaseProtocole, string> = {
   cadrage: 'Cadrage',
   signal: 'Signal',
   situation: 'Situation',
+  reaction: 'Réaction',
   argumentation: 'Argumentation',
   vote: 'Vote',
   decompte: 'Décompte',
@@ -246,6 +248,17 @@ export function GameEngine({
     setCardIdx(newIdx);
     cardShownAtRef.current = Date.now();
     lastMoverRef.current = null;
+      if (role === 'facilitator') {
+    (async () => {
+      try {
+        const { getSupabaseBrowser } = await import('../lib/supabase');
+        await getSupabaseBrowser()
+          .from('sessions')
+          .update({ elapsed_sec: 0, timer_running: false })
+          .eq('id', sessionId);
+      } catch {}
+    })();
+  }
     if (role === 'facilitator') {
       try {
         sync.sendCarte(newIdx);
@@ -326,7 +339,23 @@ export function GameEngine({
           }));
           setPions(p);
         }
-
+        if (data.cards_tirees && Array.isArray(data.cards_tirees) && data.cards_tirees.length > 0) {
+          const ids: string[] = data.cards_tirees;
+          if (ids.length > 0 && (cartesTirees.length === 0 || cartesTirees[0]?.id !== ids[0])) {
+            const cartesDB = ids
+              .map((id: string) => CARTES_DIAG.find((c) => c.id === id))
+              .filter(Boolean) as typeof CARTES_DIAG;
+            if (cartesDB.length > 0) setCartesTirees(cartesDB);
+          }
+        }
+        
+        if (data.allSelectionnees && Array.isArray(data.allSelectionnees) && data.allSelectionnees.length > 0) {
+          const ids = data.allSelectionnees;
+          if (allTirees.length === 0) {
+            const allDB = ids.map((id) => CARTES_ALL.find((c) => c.id === id)).filter(Boolean);
+            if (allDB.length > 0) setAllTirees(allDB);
+          }
+        }
         if (data.paris) {
           const v: Vote[] = data.paris.map((p: any) => ({
             playerId: p.player_id,
@@ -372,10 +401,10 @@ export function GameEngine({
           : existing.couleur === 'neutre'
           ? 'neutre'
           : existing.couleur;
-      updated = { ...existing, quadrantActuel: q, couleur };
+      updated = { ...existing, quadrantActuel: q, couleur, reactionFaite: phase === 'reaction' ? true : existing.reactionFaite };
       setPions((prev) => prev.map((p) => (p.playerId === pid ? updated : p)));
     } else {
-      updated = { playerId: pid, nick, quadrantInitial: q, quadrantActuel: q, couleur: 'neutre' };
+     updated = { playerId: pid, nick, quadrantInitial: q, quadrantActuel: q, couleur: 'neutre', reactionFaite: false };
       setPions((prev) => [...prev, updated]);
     }
     lastMoverRef.current = pid;
@@ -441,9 +470,30 @@ export function GameEngine({
     }
   };
 
+   const reaction = (pid: string, nick: string, choix: 'deplace' | 'reste' | 'neutre') => {
+    
+    marquerChangementLocal();
+    localUpdateRef.until = Date.now() + 30000;
+    const existing = pions.find((p) => p.playerId === pid);
+    if (!existing) return;
+    if (choix === 'deplace') {
+      // Le joueur va cliquer sur un cadran via deplacerPion
+      // On ne marque pas encore reactionFaite
+      return;
+    }
+    const updated: Pion = { ...existing, reactionFaite: true };
+    setPions((prev) => prev.map((p) => (p.playerId === pid ? updated : p)));
+    if (pid === playerId) {
+      try {
+        sync.sendPion(updated);
+      } catch {}
+      if (carte) savePion(sessionId, updated, carte.id).catch(() => {});
+    }
+  };
+
   const monVote = useMemo(
-    () => (playerId ? votes.find((v) => v.playerId === playerId) || null : null),
-    [votes, playerId]
+       () => (playerId ? votes.find((v) => v.playerId === playerId && v.cardId === carte?.id) || null : null),
+    [votes, playerId, carte]
   );
 
   // ----- Décompte ASYNC avec re-fetch des votes -----
@@ -451,11 +501,11 @@ export function GameEngine({
     if (!carte) return;
 
     // Re-fetch depuis la DB pour avoir tous les votes à jour
-    let votesAJour = votes;
+    let votesAJour = votes.filter((v) => v.cardId === carte.id);
     try {
       const data = await loadSession(sessionId);
       if (data?.paris) {
-        votesAJour = data.paris.map((p: any) => ({
+        votesAJour = data.paris.filter((p: any) => (p.card_id || p.question_id) === carte.id).map((p: any) => ({
           playerId: p.player_id,
           nick: data.players?.find((pp: any) => pp.id === p.player_id)?.nick || 'Anonyme',
           choix: p.pari,
@@ -540,10 +590,12 @@ export function GameEngine({
         joueurs={joueurs}
         onDeplacer={(q: Quadrant) => deplacerPion(playerId, playerNick, q)}
         onVoter={(choix: 'reste' | 'bouge' | 'neutre') => voter(playerId, playerNick, choix)}
+             onReaction={(choix: 'deplace' | 'reste' | 'neutre') => reaction(playerId, playerNick, choix)}
         monVote={monVote}
         resultat={resultat}
         dureeArgSec={dureeArgSec}
         allTirees={allTirees}
+        sessionId={sessionId}
         engagements={engagements}
         onEngagement={enregistrerEngagement}
       />
@@ -723,7 +775,7 @@ function FacilitatorView({
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <PhaseBar phase={phase} onSetPhase={onSetPhase} nbJoueurs={joueurs.length} />
           {phase === 'fermeture_all' && allTirees.length > 0 ? (
-            <AllView cartes={allTirees} raisonnements={raisonnementsAll} role="facilitator" />
+            <AllView cartes={allTirees} raisonnements={raisonnementsAll} role="facilitator" sessionId={sessionId} />
           ) : (
             carte && (
               <PunctumBoard
@@ -735,7 +787,7 @@ function FacilitatorView({
             )
           )}
           {phase === 'argumentation' && (
-            <ArgumentTimerFacilitator dureeTotalSec={dureeArgSec} joueurs={joueurs} />
+            <ArgumentTimerFacilitator dureeTotalSec={dureeArgSec} joueurs={joueurs} sessionId={sessionId} />
           )}
           {phase === 'vote' && <VotePanel votes={votes} joueurs={joueurs} />}
           {phase === 'decompte' && resultat && <ResultatPanel resultat={resultat} />}
@@ -763,10 +815,12 @@ function PlayerView({
   joueurs,
   onDeplacer,
   onVoter,
+  onReaction,
   monVote,
   resultat,
   dureeArgSec,
   allTirees,
+  sessionId,
   engagements,
   onEngagement,
 }: any) {
@@ -792,12 +846,14 @@ function PlayerView({
 
         {phase === 'fermeture_all' && allTirees.length > 0 ? (
           <AllView
-            cartes={allTirees}
-            raisonnements={[]}
-            role="player"
-            engagements={engagements}
-            onEngagement={onEngagement}
-          />
+  cartes={allTirees}
+  raisonnements={[]}
+  role="player"
+  sessionId={sessionId}
+  playerId={playerId}
+  engagements={engagements}
+  onEngagement={onEngagement}
+/>
         ) : (
           <>
             {carte && (
@@ -810,7 +866,7 @@ function PlayerView({
             <PunctumBoard
               pions={monPion ? [monPion] : []}
               onQuadrantClick={
-                ['cadrage', 'signal', 'situation', 'argumentation'].includes(phase) ? onDeplacer : undefined
+               ['cadrage', 'signal', 'situation', 'reaction', 'argumentation'].includes(phase) ? onDeplacer : undefined
               }
               selectedQuadrant={monPion?.quadrantActuel}
               retineLabel={carte?.id || ''}
@@ -820,8 +876,44 @@ function PlayerView({
         )}
 
         {phase === 'argumentation' && (
-          <ArgumentTimerPlayer dureeTotalSec={dureeArgSec} joueurs={joueurs} playerId={playerId} />
+          <ArgumentTimerPlayer dureeTotalSec={dureeArgSec} joueurs={joueurs} playerId={playerId} sessionId={sessionId} />
         )}
+              {phase === 'reaction' && (
+        <div style={{ padding: 16, background: '#FBF8EF', borderRadius: 6, border: '1px solid rgba(20,23,27,0.15)' }}>
+          <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.6, textAlign: 'center' }}>
+            Réaction
+          </div>
+          <div style={{ fontSize: 14, fontWeight: 600, marginTop: 8, textAlign: 'center' }}>
+            Veux-tu déplacer ton pion après lecture de la situation ?
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginTop: 12 }}>
+            <button
+              onClick={() => onReaction('deplace')}
+              disabled={monPion?.reactionFaite}
+              style={{ padding: 14, background: monPion?.reactionFaite ? '#E5E7EB' : '#FFFFFF', color: '#14171B', border: '2px solid rgba(20,23,27,0.3)', borderRadius: 6, fontSize: 13, fontWeight: 700, cursor: monPion?.reactionFaite ? 'not-allowed' : 'pointer' }}
+            >
+              🔄 Déplacer
+            </button>
+            <button
+              onClick={() => onReaction('reste')}
+              disabled={monPion?.reactionFaite}
+              style={{ padding: 14, background: monPion?.reactionFaite ? '#E5E7EB' : '#FFFFFF', color: '#14171B', border: '2px solid rgba(20,23,27,0.3)', borderRadius: 6, fontSize: 13, fontWeight: 700, cursor: monPion?.reactionFaite ? 'not-allowed' : 'pointer' }}
+            >
+              ✋ Rester
+            </button>
+            <button
+              onClick={() => onReaction('neutre')}
+              disabled={monPion?.reactionFaite}
+              style={{ padding: 14, background: monPion?.reactionFaite ? '#E5E7EB' : '#FFFFFF', color: '#14171B', border: '2px solid rgba(20,23,27,0.3)', borderRadius: 6, fontSize: 13, fontWeight: 700, cursor: monPion?.reactionFaite ? 'not-allowed' : 'pointer' }}
+            >
+              ⚪ Neutre
+            </button>
+          </div>
+          <div style={{ fontSize: 11, opacity: 0.6, textAlign: 'center', marginTop: 8 }}>
+            {monPion?.reactionFaite ? '✓ Choix enregistré — définitif jusqu\'au vote' : '⚠️ Un seul clic, choix définitif'}
+          </div>
+        </div>
+      )}
         {phase === 'vote' && <VotePlayer monVote={monVote} onVoter={onVoter} />}
         {phase === 'decompte' && resultat && <ResultatPanel resultat={resultat} compact />}
         <AudioPermission label="Visio joueur" />
@@ -884,10 +976,15 @@ function ControlsFacilitator({
         </button>
       )}
       {phase === 'situation' && (
-        <button style={btnStyle} onClick={() => onSetPhase('argumentation')}>
-          ▶ Lancer l'argumentation
-        </button>
-      )}
+  <button style={btnStyle} onClick={() => onSetPhase('reaction')}>
+    ▶ Ouvrir la réaction
+  </button>
+)}
+{phase === 'reaction' && (
+  <button style={btnStyle} onClick={() => onSetPhase('argumentation')}>
+    ▶ Lancer l'argumentation
+  </button>
+)}
       {phase === 'argumentation' && (
         <button style={btnStyle} onClick={() => onSetPhase('vote')}>
           ▶ Passer au vote
@@ -933,7 +1030,7 @@ function PhaseBar({ phase, onSetPhase, nbJoueurs }: any) {
       >
         Phase :
       </span>
-      {['signal', 'situation', 'argumentation', 'vote', 'decompte'].map((p) => (
+      {['signal', 'situation', 'reaction', 'argumentation', 'vote', 'decompte'].map((p) => (
         <button
           key={p}
           onClick={() => onSetPhase(p)}
@@ -973,7 +1070,7 @@ function VotePanel({ votes, joueurs }: any) {
     >
       <div style={{ display: 'flex', gap: 16, justifyContent: 'center' }}>
         <div style={{ textAlign: 'center' }}>
-          <div style={{ fontFamily: 'Georgia, serif', fontSize: 32, fontWeight: 700, color: '#B8860B' }}>
+          <div style={{ fontFamily: 'Georgia, serif', fontSize: 32, fontWeight: 700, color: '#EAB308' }}>
             {reste}
           </div>
           <div style={{ fontSize: 11, opacity: 0.6 }}>Reste</div>

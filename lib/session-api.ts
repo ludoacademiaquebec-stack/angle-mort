@@ -64,6 +64,7 @@ export async function savePion(sessionId: string, pion: Pion, cardId: string) {
   });
 }
 
+// FIX : écrit dans session_paris (source de vérité pour l'API GET) ET session_events (analytics)
 export async function savePari(
   sessionId: string,
   playerId: string,
@@ -71,6 +72,25 @@ export async function savePari(
   cardId: string,
   choix: 'reste' | 'bouge' | 'neutre'
 ) {
+  // 1. Écriture principale dans session_paris
+  try {
+    await supabase
+      .from('session_paris')
+      .delete()
+      .eq('session_id', sessionId)
+      .eq('player_id', playerId)
+      .eq('card_id', cardId);
+    await supabase.from('session_paris').insert({
+      session_id: sessionId,
+      player_id: playerId,
+      card_id: cardId,
+      pari: choix,
+    });
+  } catch (e) {
+    console.error('savePari/session_paris', e);
+  }
+
+  // 2. Écriture analytics dans session_events (non bloquant)
   try {
     await supabase.from('session_events').insert({
       session_id: sessionId,
@@ -82,13 +102,13 @@ export async function savePari(
       metadata: { choix, cardId, question_id: cardId },
     });
   } catch (e) {
-    console.error('savePari', e);
+    console.error('savePari/session_events', e);
   }
 }
 
 export async function saveResultatCarte(sessionId: string, resultat: ResultatCarte) {
   try {
-    await supabase.from('session_resultats').insert({
+    const { error } = await supabase.from('session_resultats').insert({
       session_id: sessionId,
       card_id: resultat.cardId,
       card_famille: resultat.famille || null,
@@ -106,23 +126,51 @@ export async function saveResultatCarte(sessionId: string, resultat: ResultatCar
         majorite: resultat.majorite,
       },
     });
+    if (error) console.error('[saveResultatCarte]', error);
   } catch (e) {
     console.error('saveResultatCarte', e);
   }
 }
 
+// FIX COMPLET : DELETE + INSERT (évite les doublons) + logs d'erreurs
 export async function saveEngagement(engagement: Engagement) {
   try {
-    await supabase.from('session_engagements').insert({
-      session_id: engagement.sessionId,
-      player_id: engagement.playerId,
-      all_card_id: engagement.allCardId,
-      engagement_text: engagement.engagementText,
-      indicateur: engagement.indicateur,
-      echeance: engagement.echeance,
-    });
+    // 1. Supprimer l'ancien engagement pour cette carte/joueur
+    const { error: errDel } = await supabase
+      .from('session_engagements')
+      .delete()
+      .eq('session_id', engagement.sessionId)
+      .eq('player_id', engagement.playerId)
+      .eq('all_card_id', engagement.allCardId);
+
+    if (errDel) {
+      console.warn('[saveEngagement] delete warning:', errDel.message);
+    }
+
+    // 2. Insérer le nouveau
+    const { data, error } = await supabase
+      .from('session_engagements')
+      .insert({
+        session_id: engagement.sessionId,
+        player_id: engagement.playerId,
+        all_card_id: engagement.allCardId,
+        engagement_text: engagement.engagementText,
+        indicateur: engagement.indicateur,
+        echeance: engagement.echeance,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('[saveEngagement] INSERT ERROR:', error);
+      return null;
+    }
+
+    console.log('[saveEngagement] OK:', data?.id);
+    return data;
   } catch (e) {
-    console.error('saveEngagement', e);
+    console.error('[saveEngagement] EXCEPTION:', e);
+    return null;
   }
 }
 

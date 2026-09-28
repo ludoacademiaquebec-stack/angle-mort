@@ -1,78 +1,122 @@
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
+import { supabase } from '@/lib/supabase';
 import type { Joueur } from '../lib/types';
 
-// ------------------------------------------------------------
-// Hook interne : gère le décompte total et l'index du tour
-// ------------------------------------------------------------
-function useArgumentTimer(
+function useSharedTimer(
+  sessionId: string,
   dureeTotalSec: number,
-  joueurs: { id: string; nick: string }[],
-  onFin?: () => void
+  isFacilitator: boolean
 ) {
   const [running, setRunning] = useState(false);
   const [elapsed, setElapsed] = useState(0);
-  const [indexEnCours, setIndexEnCours] = useState(0);
-
-  // Temps par joueur (réparti équitablement)
-  const tempsParJoueur = joueurs.length > 0 ? Math.floor(dureeTotalSec / joueurs.length) : 0;
+  const intervalRef = useRef<any>(null);
 
   useEffect(() => {
-    if (!running) return;
-    const iv = setInterval(() => {
-      setElapsed((e) => e + 1);
+    (async () => {
+      const { data } = await supabase
+        .from('sessions')
+        .select('elapsed_sec, timer_running')
+        .eq('id', sessionId)
+        .maybeSingle();
+      if (data) {
+        setElapsed(data.elapsed_sec || 0);
+        setRunning(data.timer_running || false);
+      }
+    })();
+  }, [sessionId]);
+
+  useEffect(() => {
+    const iv = setInterval(async () => {
+      const { data } = await supabase
+        .from('sessions')
+        .select('elapsed_sec, timer_running')
+        .eq('id', sessionId)
+        .maybeSingle();
+      if (data) {
+        setElapsed(data.elapsed_sec || 0);
+        setRunning(data.timer_running || false);
+      }
     }, 1000);
     return () => clearInterval(iv);
-  }, [running]);
+  }, [sessionId]);
 
-  // Gestion des transitions de tour et de fin (hors reducer)
   useEffect(() => {
+    if (!isFacilitator) return;
     if (!running) return;
-
-    // Calcul du tour courant à partir du temps écoulé
-    if (tempsParJoueur > 0) {
-      const idx = Math.floor(elapsed / tempsParJoueur);
-      if (idx !== indexEnCours && idx < joueurs.length) {
-        setIndexEnCours(idx);
+    intervalRef.current = setInterval(async () => {
+      const nouvelElapsed = elapsed + 1;
+      setElapsed(nouvelElapsed);
+      await supabase
+        .from('sessions')
+        .update({ elapsed_sec: nouvelElapsed })
+        .eq('id', sessionId);
+      if (nouvelElapsed >= dureeTotalSec) {
+        setRunning(false);
+        await supabase
+          .from('sessions')
+          .update({ timer_running: false })
+          .eq('id', sessionId);
       }
-    }
+    }, 1000);
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, [running, elapsed, isFacilitator, sessionId, dureeTotalSec]);
 
-    // Fin totale : stoppe juste le timer, ne fait rien d'autre
-    if (elapsed >= dureeTotalSec) {
-      setRunning(false);
-    }
-  }, [elapsed, running, tempsParJoueur, joueurs.length, dureeTotalSec, indexEnCours, onFin]);
-
-  // Désactivé : le facilitateur contrôle manuellement les phases
-
-  const demarrer = () => {
+  const demarrer = async () => {
     setElapsed(0);
-    setIndexEnCours(0);
     setRunning(true);
-  };
-
-  const arreter = () => setRunning(false);
-
-  const passerAuSuivant = () => {
-    const nextIdx = indexEnCours + 1;
-    if (nextIdx >= joueurs.length) {
-      setRunning(false);
-
-      return;
+    if (isFacilitator) {
+      await supabase
+        .from('sessions')
+        .update({ elapsed_sec: 0, timer_running: true })
+        .eq('id', sessionId);
     }
-    setIndexEnCours(nextIdx);
-    setElapsed(nextIdx * tempsParJoueur);
   };
 
-  const ajouterTemps = (secondes: number) => {
-    setElapsed((e) => Math.max(0, e - secondes));
+  const arreter = async () => {
+    setRunning(false);
+    if (isFacilitator) {
+      await supabase
+        .from('sessions')
+        .update({ timer_running: false })
+        .eq('id', sessionId);
+    }
   };
 
-  // Pour chaque joueur : temps restant dans son tour
-  const tempsRestantJoueur = (idx: number): number => {
-    const finTour = (idx + 1) * tempsParJoueur;
-    return Math.max(0, finTour - elapsed);
+  const reprendre = async () => {
+    if (elapsed >= dureeTotalSec) return;
+    setRunning(true);
+    if (isFacilitator) {
+      await supabase
+        .from('sessions')
+        .update({ timer_running: true })
+        .eq('id', sessionId);
+    }
+  };
+
+  const ajouterTemps = async (sec: number) => {
+    const nouveau = Math.max(0, elapsed - sec);
+    setElapsed(nouveau);
+    if (isFacilitator) {
+      await supabase
+        .from('sessions')
+        .update({ elapsed_sec: nouveau })
+        .eq('id', sessionId);
+    }
+  };
+
+  const reset = async () => {
+    setElapsed(0);
+    setRunning(false);
+    if (isFacilitator) {
+      await supabase
+        .from('sessions')
+        .update({ elapsed_sec: 0, timer_running: false })
+        .eq('id', sessionId);
+    }
   };
 
   const tempsRestantTotal = Math.max(0, dureeTotalSec - elapsed);
@@ -80,41 +124,34 @@ function useArgumentTimer(
   return {
     running,
     elapsed,
-    indexEnCours,
-    tempsParJoueur,
     tempsRestantTotal,
-    tempsRestantJoueur,
     demarrer,
     arreter,
-    passerAuSuivant,
+    reprendre,
     ajouterTemps,
+    reset,
   };
 }
 
-// ------------------------------------------------------------
-// Formatage mm:ss
-// ------------------------------------------------------------
 function formatTemps(sec: number): string {
   const m = Math.floor(sec / 60);
   const s = sec % 60;
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-// ------------------------------------------------------------
-// Vue facilitateur
-// ------------------------------------------------------------
 export function ArgumentTimerFacilitator({
   dureeTotalSec,
   joueurs,
+  sessionId,
 }: {
   dureeTotalSec: number;
   joueurs: Joueur[];
-  onFin?: () => void;
+  sessionId: string;
 }) {
-  // Le timer ne déclenche JAMAIS le passage de phase.
-  // C'est le facilitateur qui clique les boutons.
-  const t = useArgumentTimer(dureeTotalSec, joueurs);
-  const joueurEnCours = joueurs[t.indexEnCours];
+  const t = useSharedTimer(sessionId, dureeTotalSec, true);
+  const tempsParJoueur = joueurs.length > 0 ? Math.floor(dureeTotalSec / joueurs.length) : 0;
+  const indexEnCours =
+    tempsParJoueur > 0 ? Math.min(Math.floor(t.elapsed / tempsParJoueur), joueurs.length - 1) : 0;
 
   return (
     <div
@@ -138,7 +175,6 @@ export function ArgumentTimerFacilitator({
         Argumentation • {formatTemps(t.tempsRestantTotal)} restant
       </div>
 
-      {/* Barre de progression globale */}
       <div
         style={{
           height: 6,
@@ -158,12 +194,12 @@ export function ArgumentTimerFacilitator({
         />
       </div>
 
-      {/* Liste des joueurs */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {joueurs.map((j, i) => {
-          const estEnCours = i === t.indexEnCours && t.running;
-          const estPasse = i < t.indexEnCours;
-          const restant = t.tempsRestantJoueur(i);
+          const estEnCours = i === indexEnCours && t.running;
+          const estPasse = i < indexEnCours;
+          const finTour = (i + 1) * tempsParJoueur;
+          const restant = Math.max(0, finTour - t.elapsed);
           return (
             <div
               key={j.id}
@@ -176,7 +212,6 @@ export function ArgumentTimerFacilitator({
                 background: estEnCours ? '#FDE047' : estPasse ? 'rgba(20,23,27,0.03)' : '#FFFFFF',
                 border: estEnCours ? '1px solid #14171B' : '1px solid rgba(20,23,27,0.08)',
                 opacity: estPasse ? 0.5 : 1,
-                transition: 'all 0.15s',
               }}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -198,9 +233,8 @@ export function ArgumentTimerFacilitator({
         })}
       </div>
 
-      {/* Contrôles */}
       <div style={{ display: 'flex', gap: 8, marginTop: 16, flexWrap: 'wrap' }}>
-        {!t.running ? (
+        {!t.running && t.elapsed === 0 && (
           <button
             onClick={t.demarrer}
             style={{
@@ -217,10 +251,11 @@ export function ArgumentTimerFacilitator({
           >
             ▶ Lancer l'argumentation
           </button>
-        ) : (
+        )}
+        {t.running && (
           <>
             <button
-              onClick={t.passerAuSuivant}
+              onClick={t.arreter}
               style={{
                 flex: 1,
                 padding: '10px 16px',
@@ -233,7 +268,7 @@ export function ArgumentTimerFacilitator({
                 cursor: 'pointer',
               }}
             >
-              ⏭ Passer la parole
+              ⏸ Pause
             </button>
             <button
               onClick={() => t.ajouterTemps(30)}
@@ -249,8 +284,28 @@ export function ArgumentTimerFacilitator({
             >
               +30 s
             </button>
+          </>
+        )}
+        {!t.running && t.elapsed > 0 && (
+          <>
             <button
-              onClick={t.arreter}
+              onClick={t.reprendre}
+              style={{
+                flex: 1,
+                padding: '10px 16px',
+                background: '#14171B',
+                color: '#FFFFFF',
+                border: 'none',
+                borderRadius: 4,
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              ▶ Reprendre
+            </button>
+            <button
+              onClick={t.reset}
               style={{
                 padding: '10px 16px',
                 background: '#FBF8EF',
@@ -261,7 +316,7 @@ export function ArgumentTimerFacilitator({
                 cursor: 'pointer',
               }}
             >
-              ⏸ Pause
+              ↻ Reset
             </button>
           </>
         )}
@@ -270,28 +325,26 @@ export function ArgumentTimerFacilitator({
   );
 }
 
-// ------------------------------------------------------------
-// Vue joueur
-// ------------------------------------------------------------
 export function ArgumentTimerPlayer({
   dureeTotalSec,
   joueurs,
   playerId,
+  sessionId,
 }: {
   dureeTotalSec: number;
   joueurs: Joueur[];
   playerId: string;
+  sessionId: string;
 }) {
-  const t = useArgumentTimer(dureeTotalSec, joueurs);
-  const joueurEnCours = joueurs[t.indexEnCours];
+  const t = useSharedTimer(sessionId, dureeTotalSec, false);
+  const tempsParJoueur = joueurs.length > 0 ? Math.floor(dureeTotalSec / joueurs.length) : 0;
+  const indexEnCours =
+    tempsParJoueur > 0 ? Math.min(Math.floor(t.elapsed / tempsParJoueur), joueurs.length - 1) : 0;
+  const joueurEnCours = joueurs[indexEnCours];
   const monIndex = joueurs.findIndex((j) => j.id === playerId);
-  const cEstMonTour = monIndex === t.indexEnCours && t.running;
-  const restantMonTour = cEstMonTour ? t.tempsRestantJoueur(monIndex) : 0;
-
-  // Détection quand le tour du joueur est écoulé
-  const tourEstEcoule = cEstMonTour && restantMonTour === 0;
-
-  // Bandeau jaune à la fin du temps total
+  const cEstMonTour = monIndex === indexEnCours && t.running;
+  const finTour = (monIndex + 1) * tempsParJoueur;
+  const restantMonTour = cEstMonTour ? Math.max(0, finTour - t.elapsed) : 0;
   const tempsEcoule = t.elapsed >= dureeTotalSec;
 
   if (tempsEcoule) {
@@ -316,19 +369,16 @@ export function ArgumentTimerPlayer({
   return (
     <div
       style={{
-        background: cEstMonTour ? (tourEstEcoule ? '#FEF2F2' : '#FDE047') : '#FBF8EF',
+        background: cEstMonTour ? '#FDE047' : '#FBF8EF',
         border: cEstMonTour ? '2px solid #14171B' : '1px solid rgba(20,23,27,0.15)',
         borderRadius: 6,
         padding: 20,
         textAlign: 'center',
-        transition: 'all 0.2s',
       }}
     >
       {!t.running ? (
         <>
-          <div style={{ fontSize: 13, color: 'rgba(20,23,27,0.6)' }}>
-            En attente du lancement
-          </div>
+          <div style={{ fontSize: 13, color: 'rgba(20,23,27,0.6)' }}>En attente du lancement</div>
           <div style={{ fontSize: 11, marginTop: 4, color: 'rgba(20,23,27,0.4)' }}>
             Le facilitateur va lancer l'argumentation
           </div>
@@ -351,7 +401,7 @@ export function ArgumentTimerPlayer({
               fontFamily: 'Georgia, serif',
               fontSize: 48,
               fontWeight: 700,
-              color: tourEstEcoule ? '#DC2626' : '#14171B',
+              color: '#14171B',
               lineHeight: 1,
               marginTop: 8,
             }}
@@ -359,7 +409,7 @@ export function ArgumentTimerPlayer({
             {formatTemps(restantMonTour)}
           </div>
           <div style={{ fontSize: 12, marginTop: 8, color: 'rgba(20,23,27,0.6)' }}>
-            Argumente ton choix : pourquoi tu gardes ou tu déplaces
+            1) Ton punctum du signal • 2) Ce qui guide ta décision
           </div>
         </>
       ) : (
