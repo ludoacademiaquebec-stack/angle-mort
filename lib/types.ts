@@ -85,6 +85,7 @@ export interface Pion {
   couleur: CouleurPion;
   equipeId?: string;
   reactionFaite?: boolean;
+  nbDeplacements?: number;
 }
 
 export interface Joueur {

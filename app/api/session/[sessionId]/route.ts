@@ -100,7 +100,7 @@ export async function POST(req: NextRequest, { params }: { params: { sessionId: 
         break;
       }
 
-      case 'upsert_depot': {
+           case 'upsert_depot': {
         await db
           .from('session_depots')
           .delete()
@@ -114,6 +114,8 @@ export async function POST(req: NextRequest, { params }: { params: { sessionId: 
           quadrant: body.quadrant,
           canal: body.couleur === 'neutre' ? 'signal' : 'situation',
           slot: body.couleur === 'rouge' ? 1 : 0,
+          reaction: body.reaction || null,
+          nb_deplacements: body.nbDeplacements || 0,
         });
         if (error) throw error;
         break;

@@ -51,7 +51,12 @@ export async function savePlayer(sessionId: string, playerId: string, nick: stri
   return post(sessionId, { action: 'upsert_player', playerId, nick });
 }
 
-export async function savePion(sessionId: string, pion: Pion, cardId: string) {
+export async function savePion(
+  sessionId: string,
+  pion: Pion,
+  cardId: string,
+  reaction?: string | null
+) {
   if (!pion.quadrantActuel) return null;
   return post(sessionId, {
     action: 'upsert_depot',
@@ -61,6 +66,8 @@ export async function savePion(sessionId: string, pion: Pion, cardId: string) {
     quadrant: pion.quadrantActuel,
     canal: pion.couleur === 'neutre' ? 'signal' : 'situation',
     couleur: pion.couleur,
+    reaction: reaction || null,
+    nbDeplacements: pion.nbDeplacements || 0,
   });
 }
 
