@@ -563,7 +563,8 @@ export function GameEngine({
     changePhase('signal');
   };
 
-  const enregistrerEngagement = (allCardId: string, texte: string) => {
+ const enregistrerEngagement = (allCardId: string, texte: string) => {
+    console.log('[enregistrerEngagement]', { allCardId, texte, playerId, playerNick, sessionId });
     setEngagements((prev) => ({ ...prev, [allCardId]: texte }));
     if (playerId && playerNick && texte.trim()) {
       const carteAll = allTirees.find((c) => c.id === allCardId);
@@ -575,7 +576,9 @@ export function GameEngine({
         indicateur: carteAll?.indicateur || '',
         echeance: carteAll?.delai || 'J+7',
       };
-      saveEngagement(engagement).catch(() => {});
+      saveEngagement(engagement).catch((e) => console.error('[enregistrerEngagement] catch', e));
+    } else {
+      console.warn('[enregistrerEngagement] SKIP:', { hasPlayerId: !!playerId, hasNick: !!playerNick, hasTexte: !!texte.trim() });
     }
   };
 

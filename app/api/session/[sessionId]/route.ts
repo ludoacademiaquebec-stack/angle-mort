@@ -135,6 +135,33 @@ export async function POST(req: NextRequest, { params }: { params: { sessionId: 
         if (error) throw error;
         break;
       }
+                  case 'save_engagement': {
+        // Convertir "J+14" en date réelle
+        let echeanceDate: string | null = null;
+        if (body.echeance && typeof body.echeance === 'string') {
+          const match = body.echeance.match(/J\+(\d+)/);
+          if (match) {
+            const jours = parseInt(match[1], 10);
+            const d = new Date();
+            d.setDate(d.getDate() + jours);
+            echeanceDate = d.toISOString();
+          } else {
+            // Si c'est déjà une date ISO
+            echeanceDate = body.echeance;
+          }
+        }
+
+        const { error } = await db.from('session_engagements').insert({
+          session_id: sessionId,
+          player_id: body.playerId,
+          all_card_id: body.allCardId,
+          engagement_text: body.engagementText,
+          indicateur: body.indicateur || '',
+          echeance: echeanceDate,
+        });
+        if (error) throw error;
+        break;
+      }
 
       default:
         return NextResponse.json({ error: 'action inconnue' }, { status: 400 });
