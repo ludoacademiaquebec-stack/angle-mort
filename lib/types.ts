@@ -1,6 +1,6 @@
 // ============================================================
-// ANGLE MORT v4.1 — Types canoniques (production)
-// Ajout : phase 'reaction' + TimerState
+// ANGLE MORT v4.3 — Types ADDITIFS
+// Garde le modèle initial + ajoute quadrantCorrect (QCM) + arbitrage
 // ============================================================
 
 export type Famille = 'REC' | 'MIC' | 'PRI' | 'CLI';
@@ -21,16 +21,6 @@ export const VERSION_CONFIG: Record<Version, { nbCartes: number; dureeMin: numbe
   complet: { nbCartes: 60, dureeMin: 120, label: 'Complet (60 cartes · 2h)' },
 };
 
-// ============================================================
-// PHASES DU PROTOCOLE
-// signal      : dépôt intuition (pion neutre)
-// situation   : 30-45 sec de lecture seule
-// reaction    : "veux-tu déplacer ton pion ?" — choix définitif
-// argumentation : 2 questions à l'oral
-// vote        : choix définitif du cadran
-// decompte    : résultat révélé
-// fermeture_all : 3 cartes ALL
-// ============================================================
 export type PhaseProtocole =
   | 'cadrage'
   | 'signal'
@@ -51,11 +41,25 @@ export type ConditionResolution =
 
 export type JetonGagne = 'violet' | 'priorite' | 'lucidite' | null;
 
+// NOUVEAU : profil individuel (couche informative)
+export type ProfilIndividuel = 'intuition' | 'construit' | 'tardif' | 'perdu' | 'abandon';
+
+export interface ScoreIndividuel {
+  playerId: string;
+  nick: string;
+  profil: ProfilIndividuel;
+  positionFinale: Quadrant | null;
+  nbDeplacements: number;
+  dansLeBonCadran: boolean;
+}
+
 export interface CarteDiagnostique {
   id: string;
   famille: Famille;
   titre: string;
   image: string;
+  image_url_signal?: string | null;
+  image_url_situation?: string | null;
   signal: string;
   situation: string;
   question: string;
@@ -63,6 +67,10 @@ export interface CarteDiagnostique {
   compteur?: string;
   compteurLabel?: string;
   extra?: { type: 'effet' | 'cout'; texte: string };
+  quadrantCorrect?: Quadrant | null;
+  explication?: string | null;
+  arbitrage?: string | null;      // ← AJOUT : livret facilitateur (4-6 phrases, académique)
+  niveauDifficulte?: 1 | 2 | 3;
 }
 
 export interface CarteAll {
@@ -110,24 +118,9 @@ export interface Vote {
   sessionId?: string;
 }
 
-export interface Reaction {
-  playerId: string;
-  nick: string;
-  choix: 'deplace' | 'reste' | 'neutre';
-  nouveauQuadrant?: Quadrant;
-  timestamp: number;
-}
-
-export interface ReponseArgumentation {
-  playerId: string;
-  nick: string;
-  question1: string;
-  question2: string;
-  estPassee: boolean;
-  timestamp: number;
-}
-
+// RÉSULTAT : garde TOUT l'existant + ajoute la couche QCM
 export interface ResultatCarte {
+  // --- Existant (inchangé) ---
   cardId: string;
   famille?: Famille;
   positionSignal: Quadrant;
@@ -144,6 +137,14 @@ export interface ResultatCarte {
   bouge?: number;
   neutre?: number;
   majorite?: 'reste' | 'bouge' | 'neutre' | 'egalite';
+
+  // --- Couche QCM (vérité terrain) ---
+  quadrantCorrect?: Quadrant | null;
+  explication?: string | null;
+  arbitrage?: string | null;    // ← AJOUT : arbitrage scientifique complet
+  nbOntVuJuste?: number;        // combien de pions dans quadrantCorrect
+  totalJoueurs?: number;        // total pions
+  scoresIndividuels?: ScoreIndividuel[];
 }
 
 export interface Engagement {
@@ -176,11 +177,7 @@ export interface SessionState {
   cartesTirees: string[];
   pions: Pion[];
   votes: Vote[];
-  reactions: Reaction[];
-  reponsesArgumentation: ReponseArgumentation[];
   resultatCarte: ResultatCarte | null;
-  cartesQuestionTotales: number;
-  cartesMesureTotales: number;
   allSelectionnees: string[];
   engagementRetenu: string | null;
   timer: TimerState;

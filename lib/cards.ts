@@ -724,9 +724,6 @@ const CARTES_CLI: CarteDiagnostique[] = [
 // ------------------------------------------------------------
 // CARTES ALL — Alliés en action (01-15)
 // Réservées à la fermeture, jamais en tirage aléatoire
-// ------------------------------------------------------------
-// CARTES ALL — Alliés en action (01-15)
-// Réservées à la fermeture, jamais en tirage aléatoire
 // zoneCible = quadrant visé pour le tirage intelligent v4.0
 // ------------------------------------------------------------
 export const CARTES_ALL: CarteAll[] = [
@@ -964,27 +961,52 @@ export async function loadCardsDiagFromDB(): Promise<CarteDiagnostique[]> {
   try {
     const { data } = await supabaseClient.from('cards_diag').select('*').order('ordre', { ascending: true });
     if (data && data.length > 0) {
-      CACHE_DIAG = data.map((r:any) => ({
-        id: r.id, famille: r.famille, titre: r.titre, image: r.image, signal: r.signal, situation: r.situation,
-        question: r.question, motPiege: r.mot_piege, compteur: r.compteur, compteurLabel: r.compteur_label,
-        extra: r.extra_type? { type: r.extra_type, texte: r.extra_texte } : r.extra || undefined,
-        ordre: r.ordre
+      CACHE_DIAG = data.map((r: any) => ({
+        id: r.id,
+        famille: r.famille,
+        titre: r.titre,
+        image: r.image,
+        image_url_signal: r.image_url_signal || null,
+        image_url_situation: r.image_url_situation || null,
+        signal: r.signal,
+        situation: r.situation,
+        question: r.question,
+        motPiege: r.mot_piege,
+        compteur: r.compteur,
+        compteurLabel: r.compteur_label,
+        extra: r.extra_type ? { type: r.extra_type, texte: r.extra_texte } : r.extra || undefined,
+        quadrantCorrect: r.quadrant_correct || null,
+        explication: r.explication || null,
+        arbitrage: r.arbitrage || null,
+        niveauDifficulte: r.niveau_difficulte || 2,
+        ordre: r.ordre,
       })) as CarteDiagnostique[];
       return CACHE_DIAG;
     }
   } catch {}
+
   // Fallback signal_cards ancienne table
   try {
     const { data } = await supabaseClient.from('signal_cards').select('*').order('ordre', { ascending: true });
     if (data && data.length > 0) {
-      CACHE_DIAG = data.map((r:any) => ({
-        id: r.id, famille: r.famille, titre: r.titre, image: r.image, signal: r.signal, situation: r.situation,
-        question: r.question, motPiege: r.mot_piege, compteur: r.compteur, compteurLabel: r.compteur_label,
-        extra: r.extra || undefined, ordre: r.ordre
+      CACHE_DIAG = data.map((r: any) => ({
+        id: r.id,
+        famille: r.famille,
+        titre: r.titre,
+        image: r.image,
+        signal: r.signal,
+        situation: r.situation,
+        question: r.question,
+        motPiege: r.mot_piege,
+        compteur: r.compteur,
+        compteurLabel: r.compteur_label,
+        extra: r.extra || undefined,
+        ordre: r.ordre,
       })) as CarteDiagnostique[];
       return CACHE_DIAG;
     }
   } catch {}
+
   CACHE_DIAG = CARTES_DIAG;
   return CACHE_DIAG;
 }
@@ -994,8 +1016,17 @@ export async function loadCardsAllFromDB(): Promise<CarteAll[]> {
   try {
     const { data } = await supabaseClient.from('cards_all').select('*').order('ordre', { ascending: true });
     if (data && data.length > 0) {
-      CACHE_ALL = data.map((r:any) => ({
-        id: r.id, famille: 'ALL', titre: r.titre, action: r.action, indicateur: r.indicateur, delai: r.delai, niveau: r.niveau, couleur: r.couleur, ordre: r.ordre
+      CACHE_ALL = data.map((r: any) => ({
+        id: r.id,
+        famille: 'ALL',
+        titre: r.titre,
+        action: r.action,
+        indicateur: r.indicateur,
+        delai: r.delai,
+        niveau: r.niveau,
+        couleur: r.couleur,
+        zoneCible: r.zone_cible || null,
+        ordre: r.ordre,
       })) as CarteAll[];
       return CACHE_ALL;
     }
@@ -1007,11 +1038,11 @@ export async function loadCardsAllFromDB(): Promise<CarteAll[]> {
 export async function getCarteByIdAsync(id: string) {
   const diag = await loadCardsDiagFromDB();
   const all = await loadCardsAllFromDB();
-  return diag.find(c=>c.id===id)?? all.find(c=>c.id===id);
+  return diag.find((c) => c.id === id) ?? all.find((c) => c.id === id);
 }
 
 export async function tirerCartesDiagAsync(n: number) {
   const diag = await loadCardsDiagFromDB();
-  const shuffled = [...diag].sort(()=>Math.random()-0.5);
-  return shuffled.slice(0,n);
+  const shuffled = [...diag].sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, n);
 }

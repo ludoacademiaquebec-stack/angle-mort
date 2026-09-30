@@ -1,9 +1,10 @@
 'use client';
 
 // ============================================================
-// ANGLE MORT v4.1.0 FINAL — GameEngine PRODUCTION
+// ANGLE MORT v4.2.1 — Fix race condition broadcast/poll
 // Mécanique : pion = position · vote = opinion
-// Réaction : 2 boutons Bouger/Rester · Vote : 3 boutons
+// Signal : dépôt neutre → Réaction : 2 boutons (Bouger/Rester)
+// Vote : 3 boutons OU clic cadran (bouge implicite)
 // ============================================================
 
 import { useState, useMemo, useEffect, useRef } from 'react';
@@ -69,6 +70,11 @@ const PHASE_LABEL: Record<PhaseProtocole, string> = {
   decompte: 'Décompte',
   fermeture_all: 'Fermeture ALL',
 };
+
+// Fenêtre de grâce appliquée côté player quand un broadcast arrive,
+// pour éviter qu'un poll en vol (avec données périmées) ne réécrase
+// la phase reçue par broadcast.
+const BROADCAST_GRACE_MS = 4000;
 
 interface GameEngineProps {
   sessionId: string;
@@ -145,9 +151,7 @@ export function GameEngine({
         setVotes(v);
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [sessionId]);
 
   // ----- Tirage cartes synchronisé -----
@@ -173,9 +177,7 @@ export function GameEngine({
 
       if (role === 'facilitator') {
         try {
-          await saveSession(sessionId, {
-            cardsTirees: cartes.map((c) => c.id),
-          } as any);
+          await saveSession(sessionId, { cardsTirees: cartes.map((c) => c.id) } as any);
         } catch {}
       }
     })();
@@ -211,6 +213,7 @@ export function GameEngine({
 
   const changePhase = (newPhase: PhaseProtocole) => {
     marquerChangementLocal();
+    localUpdateRef.until = Date.now() + 10000;
     setPhase(newPhase);
     if (newPhase !== 'argumentation') setArgumentationTerminee(false);
     if (role === 'facilitator') {
@@ -230,7 +233,9 @@ export function GameEngine({
 
   const changeCardIdx = (newIdx: number) => {
     marquerChangementLocal();
+    localUpdateRef.until = Date.now() + 10000;
     setCardIdx(newIdx);
+    setPhase('signal');
     cardShownAtRef.current = Date.now();
     lastMoverRef.current = null;
     if (role === 'facilitator') {
@@ -244,18 +249,30 @@ export function GameEngine({
         } catch {}
       })();
       try { sync.sendCarte(newIdx); } catch {}
+      try { sync.sendPhase('signal'); } catch {}
       try { saveSession(sessionId, { phase: 'signal', cardIdx: newIdx }); } catch {}
     }
   };
 
+  // ============================================================
+  // FIX : Les effets qui appliquent les broadcasts côté player
+  // posent désormais une fenêtre de grâce locale, pour empêcher
+  // qu'un poll en vol (retournant une valeur périmée) ne réécrase
+  // la phase/cardIdx qui vient d'être reçue par broadcast.
+  // ============================================================
+
   useEffect(() => {
     if (role === 'player' && sync.remotePhase && sync.remotePhase !== phase) {
+      // Grâce locale : protège contre les réponses de poll périmées
+      localUpdateRef.until = Math.max(localUpdateRef.until, Date.now() + BROADCAST_GRACE_MS);
       setPhase(sync.remotePhase as PhaseProtocole);
     }
   }, [role, sync.remotePhase, phase]);
 
   useEffect(() => {
     if (role === 'player' && sync.remoteCardIdx !== null && sync.remoteCardIdx !== cardIdx) {
+      // Grâce locale : protège contre les réponses de poll périmées
+      localUpdateRef.until = Math.max(localUpdateRef.until, Date.now() + BROADCAST_GRACE_MS);
       setCardIdx(sync.remoteCardIdx);
       cardShownAtRef.current = Date.now();
     }
@@ -298,24 +315,22 @@ export function GameEngine({
 
         const curPhase = phaseRef.current;
         const curCardIdx = cardIdxRef.current;
+        const graceActive = Date.now() < localUpdateRef.until;
 
-        // Phase sync (avec guard)
-        if (data.phase && data.phase !== curPhase && Date.now() > localUpdateRef.until) {
+        if (data.phase && data.phase !== curPhase && !graceActive) {
           setPhase(data.phase);
         }
 
-        // CardIdx sync (avec guard)
         if (
           typeof data.cardIdx === 'number' &&
           data.cardIdx >= 0 &&
           data.cardIdx !== curCardIdx &&
-          Date.now() > localUpdateRef.until
+          !graceActive
         ) {
           setCardIdx(data.cardIdx);
         }
 
-        // Pions
-        if (data.depots && Date.now() > localUpdateRef.until) {
+        if (data.depots && !graceActive) {
           const p: Pion[] = data.depots.map((d: any) => ({
             playerId: d.player_id,
             nick: data.players?.find((pp: any) => pp.id === d.player_id)?.nick || 'Anonyme',
@@ -373,7 +388,7 @@ export function GameEngine({
     return pions.find((p) => p.playerId === playerId) || null;
   }, [pions, playerId]);
 
-  // ----- Déplacement pion -----
+  // ----- Déplacement pion (signal / réaction / vote) -----
   const deplacerPion = (pid: string, nick: string, q: Quadrant) => {
     const existing = pions.find((p) => p.playerId === pid);
     const prevQ = existing?.quadrantActuel || null;
@@ -389,6 +404,8 @@ export function GameEngine({
       const couleur =
         phase === 'reaction'
           ? 'rouge'
+          : phase === 'vote'
+          ? (existing.quadrantInitial === q ? 'jaune' : 'rouge')
           : existing.quadrantInitial && existing.quadrantInitial !== q
           ? 'rouge'
           : existing.couleur === 'neutre'
@@ -420,6 +437,23 @@ export function GameEngine({
       try { sync.sendPion(updated); } catch {}
       if (carte) {
         savePion(sessionId, updated, carte.id, phase === 'reaction' ? 'bouge' : null).catch(() => {});
+
+        // Phase vote : clic cadran = vote implicite
+        if (phase === 'vote' && existing) {
+          const voteAuto: 'reste' | 'bouge' =
+            existing.quadrantInitial === q ? 'reste' : 'bouge';
+          const newVote: Vote = {
+            playerId: pid,
+            nick,
+            choix: voteAuto,
+            cardId: carte.id,
+            timestamp: Date.now(),
+          };
+          setVotes((prev) => [...prev.filter((v) => v.playerId !== pid), newVote]);
+          try { sync.sendVote(newVote); } catch {}
+          savePari(sessionId, pid, nick, carte.id, voteAuto).catch(() => {});
+        }
+
         logEvent({
           type: prevQ ? 'change_quadrant' : 'move',
           from_quadrant: prevQ,
@@ -450,7 +484,7 @@ export function GameEngine({
     }
   };
 
-  // ----- Vote (opinion, ne touche au pion QUE si neutre) -----
+  // ----- Vote final (opinion) -----
   const voter = (pid: string, nick: string, choix: 'reste' | 'bouge' | 'neutre') => {
     const newVote: Vote = {
       playerId: pid,
@@ -471,6 +505,38 @@ export function GameEngine({
           if (monPionUpdated) {
             try { sync.sendPion(monPionUpdated); } catch {}
             savePion(sessionId, monPionUpdated, carte.id, 'neutre').catch(() => {});
+          }
+        }
+        return updatedPions;
+      });
+    }
+
+    if (choix === 'reste') {
+      setPions((prev) => {
+        const updatedPions = prev.map((p) =>
+          p.playerId === pid ? { ...p, couleur: 'jaune' as const } : p
+        );
+        if (pid === playerId && carte) {
+          const monPionUpdated = updatedPions.find((p) => p.playerId === pid);
+          if (monPionUpdated) {
+            try { sync.sendPion(monPionUpdated); } catch {}
+            savePion(sessionId, monPionUpdated, carte.id, 'reste').catch(() => {});
+          }
+        }
+        return updatedPions;
+      });
+    }
+
+    if (choix === 'bouge') {
+      setPions((prev) => {
+        const updatedPions = prev.map((p) =>
+          p.playerId === pid ? { ...p, couleur: 'rouge' as const } : p
+        );
+        if (pid === playerId && carte) {
+          const monPionUpdated = updatedPions.find((p) => p.playerId === pid);
+          if (monPionUpdated) {
+            try { sync.sendPion(monPionUpdated); } catch {}
+            savePion(sessionId, monPionUpdated, carte.id, 'bouge').catch(() => {});
           }
         }
         return updatedPions;
@@ -499,12 +565,9 @@ export function GameEngine({
     if (!existing) return;
 
     if (choix === 'bouge') {
-      // Le joueur doit cliquer un cadran (via deplacerPion)
-      // On ne marque rien — reactionFaite sera mis à true dans deplacerPion
       return;
     }
 
-    // choix === 'reste' : pion jaune, reste en place
     const updated: Pion = { ...existing, reactionFaite: true, couleur: 'jaune' };
     setPions((prev) => prev.map((p) => (p.playerId === pid ? updated : p)));
     if (pid === playerId) {
@@ -542,7 +605,7 @@ export function GameEngine({
       }
     } catch {}
 
-    const res = construireResultat(carte.id, pions, votesAJour, carte.famille);
+    const res = construireResultat(carte, pions, votesAJour);
     if (!res) {
       alert('Aucun vote ou aucun pion enregistré. Impossible de décompter.');
       return;
@@ -585,7 +648,6 @@ export function GameEngine({
     setPions([]);
     setVotes([]);
     setResultat(null);
-    // changeCardIdx a déjà fait saveSession phase:'signal' + cardIdx:newIdx
   };
 
   // ----- Engagement -----
@@ -727,8 +789,9 @@ function FacilitatorView({
             {sessionId} • {joueurs.length} joueurs • {carte?.id || '—'} [{cardIdx + 1}/{totalCartes}]
           </span>
           <a
-            href={`/rapport/${sessionId}`}
+            href={`/rapport-profond?sessionId=${sessionId}`}
             target="_blank"
+            rel="noreferrer"
             style={{
               fontSize: 10,
               background: '#FDE047',
@@ -809,7 +872,9 @@ function FacilitatorView({
             <ArgumentTimerFacilitator dureeTotalSec={dureeArgSec} joueurs={joueurs} sessionId={sessionId} />
           )}
           {phase === 'vote' && <VotePanel votes={votes} joueurs={joueurs} />}
-          {phase === 'decompte' && resultat && <ResultatPanel resultat={resultat} />}
+          {phase === 'decompte' && resultat && (
+            <ResultatPanel resultat={resultat} carte={carte} showArbitrage />
+          )}
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -885,7 +950,7 @@ function PlayerView({
             <PunctumBoard
               pions={monPion ? [monPion] : []}
               onQuadrantClick={
-                ['cadrage', 'signal', 'reaction'].includes(phase) ? onDeplacer : undefined
+                ['cadrage', 'signal', 'reaction', 'vote'].includes(phase) ? onDeplacer : undefined
               }
               selectedQuadrant={monPion?.quadrantActuel}
               retineLabel={carte?.id || ''}
@@ -936,7 +1001,41 @@ function PlayerView({
         )}
 
         {phase === 'vote' && <VotePlayer monVote={monVote} onVoter={onVoter} />}
-        {phase === 'decompte' && resultat && <ResultatPanel resultat={resultat} compact />}
+        {phase === 'decompte' && resultat && (
+          <>
+            <ResultatPanel resultat={resultat} compact />
+            {(() => {
+              const monScore = resultat.scoresIndividuels?.find((s: any) => s.playerId === playerId);
+              if (!monScore) return null;
+              const profils: Record<string, { label: string; couleur: string; desc: string }> = {
+                intuition: { label: '🏆 Punctum instantané', couleur: '#10B981', desc: 'Tu as vu juste dès le signal. Intuition pure.' },
+                construit: { label: '🎯 Punctum construit', couleur: '#3B82F6', desc: 'Tu as trouvé après quelques déplacements.' },
+                tardif: { label: '💭 Punctum tardif', couleur: '#EAB308', desc: 'Tu as trouvé après plusieurs déplacements.' },
+                perdu: { label: '❌ Angle mort', couleur: '#EF4444', desc: 'Tu es resté dans le mauvais cadran. Tu reçois le jeton Violet (droit de question).' },
+                abandon: { label: '⚪ Abandon', couleur: '#6B7280', desc: 'Tu as choisi neutre. Le pion n\'est pas compté.' },
+              };
+              const p = profils[monScore.profil] || profils.abandon;
+              return (
+                <div style={{ padding: 16, background: '#FBF8EF', borderRadius: 6, border: `2px solid ${p.couleur}` }}>
+                  <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.6 }}>
+                    Ton profil individuel
+                  </div>
+                  <div style={{ fontFamily: 'Georgia, serif', fontSize: 16, fontWeight: 700, marginTop: 6, color: p.couleur }}>
+                    {p.label}
+                  </div>
+                  <div style={{ fontSize: 12, marginTop: 4, color: '#14171B', opacity: 0.8 }}>
+                    {p.desc}
+                  </div>
+                  <div style={{ display: 'flex', gap: 16, marginTop: 10, fontSize: 11, fontFamily: 'ui-monospace, monospace', opacity: 0.6 }}>
+                    <span>Position finale : <b>{monScore.positionFinale || '—'}</b></span>
+                    <span>Déplacements : <b>{monScore.nbDeplacements}</b></span>
+                    <span>{monScore.dansLeBonCadran ? '✅ Dans le juste' : '❌ Hors du juste'}</span>
+                  </div>
+                </div>
+              );
+            })()}
+          </>
+        )}
         <AudioPermission label="Visio joueur" />
       </div>
     </div>
@@ -1112,6 +1211,9 @@ function VotePlayer({ monVote, onVoter }: any) {
       <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.6, textAlign: 'center' }}>
         Vote final
       </div>
+      <div style={{ fontSize: 11, opacity: 0.7, textAlign: 'center', marginBottom: 4 }}>
+        💡 Clique un cadran pour bouger la carte · ou <b>Reste</b> / <b>Neutre</b>
+      </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
         <button
           onClick={() => onVoter('reste')}
@@ -1136,9 +1238,25 @@ function VotePlayer({ monVote, onVoter }: any) {
   );
 }
 
-function ResultatPanel({ resultat, compact }: { resultat: ResultatCarte; compact?: boolean }) {
+// ============================================================
+// RESULTAT PANEL — enrichi avec arbitrage repliable (facilitateur)
+// ============================================================
+function ResultatPanel({
+  resultat,
+  carte,
+  compact,
+  showArbitrage = false,
+}: {
+  resultat: ResultatCarte;
+  carte?: any;
+  compact?: boolean;
+  showArbitrage?: boolean;
+}) {
+  const [arbitrageOpen, setArbitrageOpen] = useState(false);
   const couleur = COULEUR_CONDITION[resultat.condition];
   const estVide = resultat.condition === 'en_attente' || resultat.condition === 'egalite';
+  const arbitrage: string | undefined = carte?.arbitrage || (resultat as any)?.arbitrage;
+
   return (
     <div style={{ padding: compact ? 12 : 16, background: '#14171B', color: '#FBF8EF', borderRadius: 6 }}>
       <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, letterSpacing: '0.14em', textTransform: 'uppercase', opacity: 0.6 }}>
@@ -1148,22 +1266,85 @@ function ResultatPanel({ resultat, compact }: { resultat: ResultatCarte; compact
         {LIBELLE_CONDITION[resultat.condition]}
       </div>
       <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>{DESCRIPTION_CONDITION[resultat.condition]}</div>
+
       {!estVide && (
-        <div style={{ display: 'flex', gap: 16, marginTop: 10, fontSize: 11, fontFamily: 'ui-monospace, monospace', opacity: 0.7 }}>
-          <span>
-            <span>JAUNES : </span>
-            <span>{resultat.pointsJaunes}</span>
-            <span> pts</span>
-            {resultat.jetonDonne === 'lucidite' ? <span> + Lucidité</span> : null}
-          </span>
-          <span>
-            <span>ROUGES : </span>
-            <span>{resultat.pointsRouges}</span>
-            <span> pts</span>
-            {resultat.jetonDonne === 'priorite' ? <span> + Priorité</span> : null}
-          </span>
-          {resultat.jetonDonne === 'violet' ? <span>+ Violet ?</span> : null}
-        </div>
+        <>
+          <div style={{ display: 'flex', gap: 16, marginTop: 10, fontSize: 11, fontFamily: 'ui-monospace, monospace', opacity: 0.7 }}>
+            <span>JAUNES : {resultat.pointsJaunes} pts{resultat.jetonDonne === 'lucidite' ? ' + Lucidité' : ''}</span>
+            <span>ROUGES : {resultat.pointsRouges} pts{resultat.jetonDonne === 'priorite' ? ' + Priorité' : ''}</span>
+            {resultat.jetonDonne === 'violet' && <span>+ Violet ?</span>}
+          </div>
+
+          {/* Couche QCM */}
+          {resultat.quadrantCorrect && (
+            <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.15)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontSize: 11, fontFamily: 'ui-monospace, monospace', opacity: 0.6 }}>
+                  🎯 CADRAN CORRECT
+                </span>
+                <span style={{ padding: '3px 10px', borderRadius: 4, background: '#10B981', color: '#FFFFFF', fontSize: 13, fontWeight: 700, fontFamily: 'ui-monospace, monospace' }}>
+                  {resultat.quadrantCorrect}
+                </span>
+                <span style={{ fontSize: 12, opacity: 0.7, marginLeft: 'auto', fontFamily: 'ui-monospace, monospace' }}>
+                  {resultat.nbOntVuJuste || 0}/{resultat.totalJoueurs || 0} ont vu juste
+                </span>
+              </div>
+              {resultat.explication && (
+                <div style={{ marginTop: 10, padding: 10, background: 'rgba(255,255,255,0.05)', borderRadius: 4, fontSize: 12, lineHeight: 1.6, fontStyle: 'italic', opacity: 0.9 }}>
+                  {resultat.explication}
+                </div>
+              )}
+
+              {/* ARBITRAGE SCIENTIFIQUE — repliable, facilitateur uniquement */}
+              {showArbitrage && arbitrage && (
+                <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.15)' }}>
+                  <button
+                    onClick={() => setArbitrageOpen((v) => !v)}
+                    style={{
+                      width: '100%',
+                      padding: '10px 14px',
+                      background: arbitrageOpen ? '#FDE047' : 'rgba(255,255,255,0.08)',
+                      color: arbitrageOpen ? '#14171B' : '#FBF8EF',
+                      border: '1px solid rgba(255,255,255,0.2)',
+                      borderRadius: 4,
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      fontFamily: 'ui-monospace, monospace',
+                      letterSpacing: '0.08em',
+                    }}
+                  >
+                    <span>🔍 VOIR L'ARBITRAGE SCIENTIFIQUE</span>
+                    <span style={{ fontSize: 10 }}>{arbitrageOpen ? '▲ FERMER' : '▼ OUVRIR'}</span>
+                  </button>
+                  {arbitrageOpen && (
+                    <div
+                      style={{
+                        marginTop: 10,
+                        padding: 14,
+                        background: '#F7F2E9',
+                        color: '#14171B',
+                        borderRadius: 4,
+                        fontSize: 13,
+                        lineHeight: 1.7,
+                        fontStyle: 'italic',
+                      }}
+                    >
+                      <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.15em', marginBottom: 8, fontStyle: 'normal', opacity: 0.7 }}>
+                        LIVRET DE RÉPONSES — FACILITATEUR
+                      </div>
+                      {arbitrage}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </>
       )}
     </div>
   );

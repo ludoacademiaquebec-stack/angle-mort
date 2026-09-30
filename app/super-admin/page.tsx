@@ -3,6 +3,8 @@ import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
 import { getCartesDiag, getCartesAll } from '@/lib/cards';
+import { ImageGeneratorCard } from '@/components/ImageGeneratorCard';
+
 const CARTES_DIAG_STATIC = getCartesDiag();
 const CARTES_ALL_STATIC = getCartesAll();
 
@@ -31,6 +33,56 @@ type Session = {
 const FAMILLES = ['REC', 'MIC', 'PRI', 'CLI'] as const;
 const ZONES = ['NO', 'NE', 'SO', 'SE', 'ALL'] as const;
 const VERSIONS = ['rapide', 'moyen', 'long', 'complet'] as const;
+
+// ============================================================
+// Heuristique locale : suggère le quadrant correct + explication + arbitrage
+// (fallback si l'IA Groq n'est pas disponible)
+// ============================================================
+function suggererQuadrant(carte: any): {
+  quadrant: 'NO' | 'NE' | 'SO' | 'SE';
+  explication: string;
+  arbitrage: string;
+} {
+  const texte = ((carte.signal || '') + ' ' + (carte.situation || '') + ' ' + (carte.motPiege || '')).toLowerCase();
+
+  if (/processus|vérifi|traç|document|mesur|suivi|transparen|explicite|systémat|reconnai/.test(texte)) {
+    return {
+      quadrant: 'NO',
+      explication: `Le signal et la situation pointent vers N-O (Vision centrale nette). L'organisation dispose d'un processus explicite, vérifiable et suivi d'effet. La voix est présente, entendue et suivie d'action. C'est une inclusion réelle — pas de tache aveugle.`,
+      arbitrage: `Critère décisif : présence de processus explicites et traçables. Selon Shore et al. (2011), l'inclusion réelle combine appartenance forte et unicité valorisée. Ici, la voix est non seulement présente mais suivie d'effet, ce qui écarte le SE (présence sans pouvoir) et le SO (assimilation forcée). Le choix est assumé et lisible, ce qui distingue du NE par l'absence de rejet.`,
+    };
+  }
+
+  if (/assum|on dit non|clairement pos|choix lisible|contestable|révisab/.test(texte)) {
+    return {
+      quadrant: 'NE',
+      explication: `Le signal et la situation révèlent un choix explicite et assumé de ne pas inclure. On dit non, on le dit clairement. Il n'y a pas de tache aveugle : c'est un choix lisible, contestable et révisable. C'est un Hors champ assumé.`,
+      arbitrage: `Le critère décisif est le caractère explicite et assumé du refus d'inclusion. Contrairement au SE (qui prétend inclure) et au SO (qui ne voit pas), ici l'organisation énonce sa position. C'est ce que Greimas nomme S2 (l'Exclusion) dans sa forme la plus lisible. Selon Ely & Thomas (2001), ce type de position est révisable par la discussion : c'est ce qui la rend contestable et donc pédagogiquement utile.`,
+    };
+  }
+
+  if (/affiche|coche|symboliqu|façade|croit|prétend|prétexte|communiqu|on dit que|image/.test(texte)) {
+    return {
+      quadrant: 'SE',
+      explication: `Le signal dénonce une présence symbolique sans pouvoir réel. On affiche, on coche, on communique — mais la décision se prend ailleurs. L'organisation croit voir alors qu'elle ne voit pas. C'est une Tache aveugle par façade.`,
+      arbitrage: `Le critère décisif est le décalage entre l'affichage et le pouvoir réel. Le tokenisme (Kanter, 1977) décrit précisément cette présence symbolique sans influence décisionnelle. La distinction avec le SO tient à l'intention : ici, l'organisation expose la diversité comme faire-valoir (communication, image), alors que dans le SO, elle se contente de ne pas voir. Selon Derald Wing Sue, ces situations relèvent de microagressions systémiques invisibles à ceux qui les produisent.`,
+    };
+  }
+
+  if (/laisse|toler|normal|habitude|silence|inaction|on ne dit rien|on laisse/.test(texte)) {
+    return {
+      quadrant: 'SO',
+      explication: `Le signal pointe une situation où l'on laisse faire sans hostilité active. Pas d'inaction déclarée, mais inaction réelle. On laisse passer, on s'habitue. Le système apprend que c'est toléré. C'est une Tache aveugle par tolérance — on ne regarde pas.`,
+      arbitrage: `Le critère décisif est l'absence d'intention, couplée à une inaction passive. Contrairement au SE (qui instrumentalise), ici l'organisation ne fait rien — ni pour inclure, ni pour exclure. C'est une assimilation silencieuse (Non-S1 chez Greimas). Selon Kahneman (2011), ces situations résultent de biais d'omission : ne rien faire semble moins coûteux que d'agir, alors que l'inaction produit un résultat structurel équivalent à une décision.`,
+    };
+  }
+
+  return {
+    quadrant: 'SE',
+    explication: `Analyse par défaut : le signal et la situation suggèrent une tache aveugle par façade (S-E). À vérifier et éditer manuellement.`,
+    arbitrage: `Analyse par défaut générée en l'absence d'indices textuels forts. Le cadran SE est retenu car il est le plus fréquent lorsque ni le rejet explicite (NE), ni le processus inclusif (NO), ni l'inaction passive (SO) ne sont repérables. Vérification manuelle recommandée.`,
+  };
+}
 
 export default function SuperAdminPage() {
   const [auth, setAuth] = useState(false);
@@ -76,6 +128,8 @@ export default function SuperAdminPage() {
         famille: r.famille,
         titre: r.titre,
         image: r.image,
+        image_url_signal: r.image_url_signal || null,
+        image_url_situation: r.image_url_situation || null,
         signal: r.signal,
         situation: r.situation,
         question: r.question,
@@ -85,6 +139,10 @@ export default function SuperAdminPage() {
         extra: r.extra_type ? { type: r.extra_type, texte: r.extra_texte } : r.extra || undefined,
         couleur: r.couleur,
         ordre: r.ordre,
+        quadrantCorrect: r.quadrant_correct || null,
+        explication: r.explication || null,
+        arbitrage: r.arbitrage || null,
+        niveauDifficulte: r.niveau_difficulte || 2,
       })));
     } else {
       setDiag(CARTES_DIAG_STATIC as any);
@@ -173,6 +231,8 @@ export default function SuperAdminPage() {
         famille: selected.famille,
         titre: selected.titre,
         image: selected.image,
+        image_url_signal: selected.image_url_signal || null,
+        image_url_situation: selected.image_url_situation || null,
         signal: selected.signal,
         situation: selected.situation,
         question: selected.question,
@@ -183,6 +243,10 @@ export default function SuperAdminPage() {
         extra_texte: selected.extra?.texte || null,
         couleur: selected.couleur,
         ordre: selected.ordre || 0,
+        quadrant_correct: selected.quadrantCorrect || null,
+        explication: selected.explication || null,
+        arbitrage: selected.arbitrage || null,
+        niveau_difficulte: selected.niveauDifficulte || 2,
         updated_at: new Date().toISOString(),
       };
       const { error } = await supabase.from('cards_diag').upsert(payloadDiag, { onConflict: 'id' });
@@ -234,7 +298,7 @@ export default function SuperAdminPage() {
   return (
     <div style={{ minHeight: '100vh', background: '#FFFEF9', color: '#14171B' }}>
       <header style={{ padding: '16px 24px', borderBottom: '1px solid #eee', display: 'flex', justifyContent: 'space-between', background: '#FFF' }}>
-        <div style={{ fontWeight: 800 }}>Super Admin · Angle Mort v4.0</div>
+        <div style={{ fontWeight: 800 }}>Super Admin · Angle Mort v4.3</div>
         <div style={{ display: 'flex', gap: 16, fontSize: 13 }}>
           <Link href="/">Landing</Link>
           <Link href="/facilitateur">Facilitateur</Link>
@@ -414,7 +478,9 @@ export default function SuperAdminPage() {
                   <button key={c.id} onClick={() => setSelected(c)} style={{ display: 'block', width: '100%', textAlign: 'left', padding: '10px 12px', borderRadius: 6, background: selected?.id === c.id ? '#14171B' : '#F9F9F7', color: selected?.id === c.id ? '#FFF' : '#14171B', border: '1px solid #eee', marginBottom: 6, cursor: 'pointer' }}>
                     <div style={{ fontSize: 10, opacity: 0.6 }}>
                       {c.id} • {c.famille} • ordre {c.ordre}
-                      {c.zoneCible && <span style={{ marginLeft: 6, background: '#FDE047', color: '#14171B', padding: '1px 6px', borderRadius: 8 }}>{c.zoneCible}</span>}
+                      {c.quadrantCorrect && <span style={{ marginLeft: 6, background: '#10B981', color: '#FFF', padding: '1px 6px', borderRadius: 8 }}>✓ {c.quadrantCorrect}</span>}
+                      {c.image_url_signal && <span style={{ marginLeft: 6, background: '#3B82F6', color: '#FFF', padding: '1px 6px', borderRadius: 8 }}>📸</span>}
+                      {c.image_url_situation && <span style={{ marginLeft: 6, background: '#8B5CF6', color: '#FFF', padding: '1px 6px', borderRadius: 8 }}>📄</span>}
                     </div>
                     <div style={{ fontSize: 13, fontWeight: 600 }}>{c.titre}</div>
                     <div style={{ fontSize: 11, opacity: 0.7, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.question || c.action || ''}</div>
@@ -442,10 +508,127 @@ export default function SuperAdminPage() {
                       Titre (recto)
                       <input value={selected.titre} onChange={(e) => setSelected({ ...selected, titre: e.target.value })} style={{ width: '100%', padding: 8, border: '1px solid #ccc', borderRadius: 4, marginTop: 4 }} />
                     </label>
+
                     {activeTab === 'cartes' && (
                       <>
+                        {/* === QCM : Cadran correct + Explication + Arbitrage + Niveau === */}
+                        <div style={{ gridColumn: '1 / span 2', padding: 12, background: '#F7F2E9', borderRadius: 6, border: '2px solid #14171B' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                            <div style={{ fontWeight: 700, fontSize: 13 }}>🎯 Cadran correct (QCM)</div>
+                            <button
+                              onClick={async () => {
+                                const btn = document.activeElement as HTMLButtonElement;
+                                if (btn) btn.disabled = true;
+                                try {
+                                  const res = await fetch('/api/suggest-qcm', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                      signal: selected.signal,
+                                      situation: selected.situation,
+                                      motPiege: selected.motPiege,
+                                      titre: selected.titre,
+                                    }),
+                                  });
+                                  const data = await res.json();
+                                  if (!res.ok) throw new Error(data.error || 'Erreur IA');
+                                  setSelected({
+                                    ...selected,
+                                    quadrantCorrect: data.quadrant,
+                                    explication: data.explication,
+                                    arbitrage: data.arbitrage,
+                                  });
+                                } catch (e: any) {
+                                  alert('Erreur Groq : ' + e.message);
+                                } finally {
+                                  if (btn) btn.disabled = false;
+                                }
+                              }}
+                              style={{ padding: '6px 12px', background: '#FDE047', color: '#14171B', border: '1px solid #14171B', borderRadius: 4, fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
+                            >
+                              🤖 Suggérer (Groq IA)
+                            </button>
+                          </div>
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, marginBottom: 10 }}>
+                            {(['NO', 'NE', 'SO', 'SE'] as const).map((q) => (
+                              <button
+                                key={q}
+                                onClick={() => setSelected({ ...selected, quadrantCorrect: q })}
+                                style={{
+                                  padding: 10,
+                                  background: selected.quadrantCorrect === q ? '#14171B' : '#FFFFFF',
+                                  color: selected.quadrantCorrect === q ? '#FDE047' : '#14171B',
+                                  border: '2px solid #14171B',
+                                  borderRadius: 4,
+                                  fontSize: 13,
+                                  fontWeight: 700,
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                {q}
+                              </button>
+                            ))}
+                          </div>
+                          <label style={{ display: 'block', fontSize: 12, marginBottom: 6 }}>
+                            Niveau de difficulté
+                            <select
+                              value={selected.niveauDifficulte || 2}
+                              onChange={(e) => setSelected({ ...selected, niveauDifficulte: parseInt(e.target.value) })}
+                              style={{ width: '100%', padding: 8, border: '1px solid #ccc', borderRadius: 4, marginTop: 4 }}
+                            >
+                              <option value={1}>1 — Facile (2 pts base)</option>
+                              <option value={2}>2 — Moyen (3 pts base)</option>
+                              <option value={3}>3 — Difficile (5 pts base)</option>
+                            </select>
+                          </label>
+
+                          <label style={{ display: 'block', fontSize: 12, marginTop: 10 }}>
+                            Explication joueur (2-3 phrases, catégorique — affichée en temps réel)
+                            <textarea
+                              value={selected.explication || ''}
+                              onChange={(e) => setSelected({ ...selected, explication: e.target.value })}
+                              placeholder="Démontrer objectivement pourquoi ce cadran est le bon, ton catégorique..."
+                              style={{ width: '100%', padding: 8, border: '1px solid #ccc', borderRadius: 4, marginTop: 4, minHeight: 80, fontSize: 12 }}
+                            />
+                          </label>
+
+                          <label style={{ display: 'block', fontSize: 12, marginTop: 10 }}>
+                            Arbitrage facilitateur (4-6 phrases, nuancé — livret de réponses)
+                            <textarea
+                              value={selected.arbitrage || ''}
+                              onChange={(e) => setSelected({ ...selected, arbitrage: e.target.value })}
+                              placeholder="Arbitrage scientifique avec auteurs (Shore, Kanter, Sue, Kahneman, Ely & Thomas)..."
+                              style={{ width: '100%', padding: 8, border: '1px solid #ccc', borderRadius: 4, marginTop: 4, minHeight: 120, fontSize: 12, fontStyle: 'italic' }}
+                            />
+                          </label>
+                        </div>
+
+                        {/* === 2 Générateurs d'images SIGNAL et SITUATION === */}
+                        <div style={{ gridColumn: '1 / span 2', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                          <ImageGeneratorCard
+                            carteId={selected.id}
+                            titre={selected.titre}
+                            famille={selected.famille}
+                            type="signal"
+                            signalTexte={selected.signal || ''}
+                            situationTexte={selected.situation || ''}
+                            currentUrl={selected.image_url_signal}
+                            onValidated={(url) => setSelected({ ...selected, image_url_signal: url })}
+                          />
+                          <ImageGeneratorCard
+                            carteId={selected.id}
+                            titre={selected.titre}
+                            famille={selected.famille}
+                            type="situation"
+                            signalTexte={selected.signal || ''}
+                            situationTexte={selected.situation || ''}
+                            currentUrl={selected.image_url_situation}
+                            onValidated={(url) => setSelected({ ...selected, image_url_situation: url })}
+                          />
+                        </div>
+
                         <label style={{ display: 'block', fontSize: 12, gridColumn: '1 / span 2' }}>
-                          Image (URL)
+                          Image description (ancien champ texte)
                           <input value={selected.image || ''} onChange={(e) => setSelected({ ...selected, image: e.target.value })} style={{ width: '100%', padding: 8, border: '1px solid #ccc', borderRadius: 4, marginTop: 4 }} />
                         </label>
                         <label style={{ display: 'block', fontSize: 12, gridColumn: '1 / span 2' }}>
@@ -490,6 +673,7 @@ export default function SuperAdminPage() {
                         </label>
                       </>
                     )}
+
                     {activeTab === 'all' && (
                       <>
                         <label style={{ display: 'block', fontSize: 12, gridColumn: '1 / span 2' }}>

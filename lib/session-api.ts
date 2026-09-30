@@ -110,9 +110,15 @@ export async function savePari(
   }
 }
 
+// ============================================================
+// SAVE RESULTAT CARTE
+// Persiste aussi la couche QCM (quadrant, explication, arbitrage,
+// profils individuels) pour conservation historique du rapport.
+// Les colonnes doivent exister dans session_resultats (voir SQL ci-dessous).
+// ============================================================
 export async function saveResultatCarte(sessionId: string, resultat: ResultatCarte) {
   try {
-    const { error } = await supabase.from('session_resultats').insert({
+    const payload: any = {
       session_id: sessionId,
       card_id: resultat.cardId,
       card_famille: resultat.famille || null,
@@ -129,8 +135,49 @@ export async function saveResultatCarte(sessionId: string, resultat: ResultatCar
         neutre: resultat.neutre,
         majorite: resultat.majorite,
       },
-    });
-    if (error) console.error('[saveResultatCarte]', error);
+      // === Couche QCM (conservation historique) ===
+      quadrant_correct: resultat.quadrantCorrect || null,
+      explication: resultat.explication || null,
+      arbitrage: resultat.arbitrage || null,
+      nb_ont_vu_juste: resultat.nbOntVuJuste ?? null,
+      total_joueurs: resultat.totalJoueurs ?? null,
+      scores_individuels: resultat.scoresIndividuels || null,
+    };
+
+    const { error } = await supabase.from('session_resultats').insert(payload);
+    if (error) {
+      // Fallback : si les colonnes QCM n'existent pas encore, on retente
+      // avec le payload minimal pour ne pas perdre le résultat historique.
+      if (
+        error.message?.includes('column') ||
+        error.code === 'PGRST204' ||
+        error.code === '42703'
+      ) {
+        console.warn(
+          '[saveResultatCarte] Colonnes QCM absentes — fallback payload minimal.',
+          error.message
+        );
+        const minimalPayload = {
+          session_id: sessionId,
+          card_id: resultat.cardId,
+          card_famille: resultat.famille || null,
+          position_signal: resultat.positionSignal,
+          position_finale: resultat.positionFinale,
+          pari_gagnant: resultat.pariGagnant,
+          condition: resultat.condition,
+          points_jaunes: resultat.pointsJaunes,
+          points_rouges: resultat.pointsRouges,
+          jeton_donne: resultat.jetonDonne || null,
+          votes_json: payload.votes_json,
+        };
+        const { error: err2 } = await supabase
+          .from('session_resultats')
+          .insert(minimalPayload);
+        if (err2) console.error('[saveResultatCarte] fallback KO', err2);
+      } else {
+        console.error('[saveResultatCarte]', error);
+      }
+    }
   } catch (e) {
     console.error('saveResultatCarte', e);
   }
@@ -151,6 +198,10 @@ export async function saveEngagement(engagement: Engagement) {
   return result;
 }
 
+// ============================================================
+// LOAD RESULTATS
+// Lit la couche QCM si elle existe (tolérant aux colonnes absentes).
+// ============================================================
 export async function loadResultats(sessionId: string): Promise<ResultatCarte[]> {
   try {
     const { data } = await supabase
@@ -176,6 +227,13 @@ export async function loadResultats(sessionId: string): Promise<ResultatCarte[]>
       bouge: r.votes_json?.bouge,
       neutre: r.votes_json?.neutre,
       majorite: r.votes_json?.majorite,
+      // === Couche QCM (tolérant si absent) ===
+      quadrantCorrect: r.quadrant_correct || null,
+      explication: r.explication || null,
+      arbitrage: r.arbitrage || null,
+      nbOntVuJuste: r.nb_ont_vu_juste ?? undefined,
+      totalJoueurs: r.total_joueurs ?? undefined,
+      scoresIndividuels: r.scores_individuels || undefined,
     }));
   } catch (e) {
     console.error('loadResultats', e);

@@ -1,7 +1,12 @@
 import type {
   Quadrant, Pion, Vote, ResultatCarte, ConditionResolution,
-  JetonGagne, Famille, FamilleAll,
+  JetonGagne, Famille, FamilleAll, CarteDiagnostique,
+  ProfilIndividuel, ScoreIndividuel,
 } from './types';
+
+// ============================================================
+// EXISTANT (inchangé)
+// ============================================================
 
 export function positionMajoritaire(
   pions: Pion[],
@@ -98,11 +103,52 @@ export function attribuerRecompenses(
   return { gagnants, perdants };
 }
 
-export function construireResultat(
-  cardId: string,
+// ============================================================
+// Profil individuel (couche informative)
+// ============================================================
+
+export function profilIndividuel(
+  p: Pion,
+  quadrantCorrect: Quadrant | null
+): ProfilIndividuel {
+  if (p.couleur === 'neutre') return 'abandon';
+  if (!quadrantCorrect) return 'abandon';
+  const positionFinale = p.quadrantActuel;
+  if (!positionFinale) return 'abandon';
+  const dansLeBon = positionFinale === quadrantCorrect;
+  const nbDepl = p.nbDeplacements || 0;
+  if (!dansLeBon) return 'perdu';
+  if (nbDepl === 0) return 'intuition';
+  if (nbDepl <= 2) return 'construit';
+  return 'tardif';
+}
+
+export function construireScoresIndividuels(
   pions: Pion[],
-  votes: Vote[],
-  famille?: Famille | FamilleAll
+  quadrantCorrect: Quadrant | null
+): ScoreIndividuel[] {
+  return pions.map((p) => {
+    const profil = profilIndividuel(p, quadrantCorrect);
+    const dansLeBonCadran = !!(quadrantCorrect && p.quadrantActuel === quadrantCorrect);
+    return {
+      playerId: p.playerId,
+      nick: p.nick,
+      profil,
+      positionFinale: p.quadrantActuel,
+      nbDeplacements: p.nbDeplacements || 0,
+      dansLeBonCadran,
+    };
+  });
+}
+
+// ============================================================
+// CONSTRUIRE LE RÉSULTAT (ADDITIF)
+// ============================================================
+
+export function construireResultat(
+  carte: CarteDiagnostique,
+  pions: Pion[],
+  votes: Vote[]
 ): ResultatCarte | null {
   if (pions.length === 0 || votes.length === 0) return null;
 
@@ -116,9 +162,15 @@ export function construireResultat(
   const { gagnants, perdants } = attribuerRecompenses(pions, gagnant);
   const { pointsJaunes, pointsRouges, jetonDonne } = calculerRecompenses(condition);
 
+  // Calcul des profils individuels
+  const quadrantCorrect = carte.quadrantCorrect || null;
+  const scoresIndividuels = construireScoresIndividuels(pions, quadrantCorrect);
+  const nbOntVuJuste = scoresIndividuels.filter((s) => s.dansLeBonCadran).length;
+
   return {
-    cardId,
-    famille: famille as Famille,
+    // Existant
+    cardId: carte.id,
+    famille: carte.famille,
     positionSignal,
     positionFinale,
     pariGagnant: gagnant,
@@ -133,8 +185,19 @@ export function construireResultat(
     bouge,
     neutre,
     majorite,
+    // Couche QCM
+    quadrantCorrect,
+    explication: carte.explication || null,
+    arbitrage: carte.arbitrage || null,      // ← AJOUT : copie l'arbitrage dans le résultat
+    nbOntVuJuste,
+    totalJoueurs: pions.length,
+    scoresIndividuels,
   };
 }
+
+// ============================================================
+// LIBELLÉS
+// ============================================================
 
 export const LIBELLE_CONDITION: Record<ConditionResolution, string> = {
   coherence_confirmee: 'Cohérence Confirmée',
@@ -161,4 +224,20 @@ export const COULEUR_CONDITION: Record<ConditionResolution, string> = {
   angle_mort_aveugle: '#EF4444',
   egalite: '#6B7280',
   en_attente: '#6B7280',
+};
+
+export const LIBELLE_PROFIL_INDIVIDUEL: Record<ProfilIndividuel, string> = {
+  intuition: '🏆 Punctum instantané',
+  construit: '🎯 Punctum construit',
+  tardif: '💭 Punctum tardif',
+  perdu: '❌ Angle mort',
+  abandon: '⚪ Abandon',
+};
+
+export const COULEUR_PROFIL_INDIVIDUEL: Record<ProfilIndividuel, string> = {
+  intuition: '#10B981',
+  construit: '#3B82F6',
+  tardif: '#EAB308',
+  perdu: '#EF4444',
+  abandon: '#6B7280',
 };

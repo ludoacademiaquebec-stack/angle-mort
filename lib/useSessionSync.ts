@@ -1,11 +1,3 @@
-'use client';
-
-// ============================================================
-// ANGLE MORT v3.3 — useSessionSync
-// Synchronisation temps réel via Supabase Realtime Broadcast.
-// Canal : anglemort-{sessionId}
-// ============================================================
-
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { getSupabaseBrowser } from './supabase';
 
@@ -23,7 +15,16 @@ export function useSessionSync(sessionId: string, playerId?: string, nick?: stri
   const [connected, setConnected] = useState(false);
   const chRef = useRef<any>(null);
 
+  // ✅ Refs pour éviter la re-souscription quand playerId/nick changent d'identité
+  const playerIdRef = useRef(playerId);
+  const nickRef = useRef(nick);
+  useEffect(() => { playerIdRef.current = playerId; }, [playerId]);
+  useEffect(() => { nickRef.current = nick; }, [nick]);
+
+  // ✅ Souscription unique par sessionId
   useEffect(() => {
+    if (!sessionId) return;
+
     const supabase = getSupabaseBrowser();
     const ch = supabase.channel(`anglemort-${sessionId}`, {
       config: { broadcast: { self: false } },
@@ -31,18 +32,19 @@ export function useSessionSync(sessionId: string, playerId?: string, nick?: stri
 
     ch.on('broadcast', { event: 'msg' }, ({ payload }) => {
       const m = payload as any;
-      console.log('[sync] reçu:', m.type, m.playerId || '', m.data);
+      if (!m || !m.type) return;
+
       if (m.type === 'phase') {
-        setRemotePhase(m.data.phase);
+        setRemotePhase(m.data?.phase ?? null);
       } else if (m.type === 'carte') {
-        setRemoteCardIdx(m.data.cardIdx);
+        setRemoteCardIdx(typeof m.data?.cardIdx === 'number' ? m.data.cardIdx : null);
       } else if (m.type === 'pion' && m.playerId) {
         setRemotePlayers((prev) => ({
           ...prev,
           [m.playerId]: {
             ...(prev[m.playerId] || { nick: '', pion: null, vote: null }),
-            nick: m.data.nick,
-            pion: m.data.pion,
+            nick: m.data?.nick || prev[m.playerId]?.nick || '',
+            pion: m.data?.pion ?? null,
           },
         }));
       } else if (m.type === 'vote' && m.playerId) {
@@ -50,12 +52,12 @@ export function useSessionSync(sessionId: string, playerId?: string, nick?: stri
           ...prev,
           [m.playerId]: {
             ...(prev[m.playerId] || { nick: '', pion: null, vote: null }),
-            nick: m.data.nick,
-            vote: m.data.vote,
+            nick: m.data?.nick || prev[m.playerId]?.nick || '',
+            vote: m.data?.vote ?? null,
           },
         }));
       } else if (m.type === 'resultat') {
-        setRemoteResultat(m.data.resultat);
+        setRemoteResultat(m.data?.resultat ?? null);
       } else if (m.type === 'hello' && m.playerId && m.data) {
         setRemotePlayers((prev) => ({
           ...prev,
@@ -70,71 +72,73 @@ export function useSessionSync(sessionId: string, playerId?: string, nick?: stri
     ch.subscribe((status: string) => {
       if (status === 'SUBSCRIBED') {
         setConnected(true);
-        if (playerId && nick) {
+        // ✅ Utilise les refs pour éviter de relancer l'effet
+        const pid = playerIdRef.current;
+        const nk = nickRef.current;
+        if (pid && nk) {
           ch.send({
             type: 'broadcast',
             event: 'msg',
-            payload: { type: 'hello', playerId, data: { nick } },
+            payload: { type: 'hello', playerId: pid, data: { nick: nk } },
           });
         }
+      } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+        setConnected(false);
       }
     });
 
     chRef.current = ch;
+
     return () => {
-      ch.unsubscribe();
+      // ✅ removeChannel supprime complètement le canal côté client Supabase
+      try {
+        supabase.removeChannel(ch);
+      } catch {}
       chRef.current = null;
+      setConnected(false);
     };
-  }, [sessionId, playerId, nick]);
+  }, [sessionId]); // ✅ uniquement sessionId
+
+  // ✅ Envoi "safe" : vérifie que le canal est prêt et capture les erreurs
+  const safeSend = useCallback((payload: any) => {
+    const ch = chRef.current;
+    if (!ch) return;
+    try {
+      // Certaines versions retournent une promesse
+      const p = ch.send({ type: 'broadcast', event: 'msg', payload });
+      if (p && typeof p.catch === 'function') {
+        p.catch((err: any) => console.warn('[sync] send error:', err));
+      }
+    } catch (err) {
+      console.warn('[sync] send error:', err);
+    }
+  }, []);
 
   const sendPhase = useCallback((phase: string) => {
-    chRef.current?.send({
-      type: 'broadcast',
-      event: 'msg',
-      payload: { type: 'phase', data: { phase } },
-    });
-  }, []);
+    safeSend({ type: 'phase', data: { phase } });
+  }, [safeSend]);
 
   const sendCarte = useCallback((cardIdx: number) => {
-    chRef.current?.send({
-      type: 'broadcast',
-      event: 'msg',
-      payload: { type: 'carte', data: { cardIdx } },
-    });
-  }, []);
+    safeSend({ type: 'carte', data: { cardIdx } });
+  }, [safeSend]);
 
-  const sendPion = useCallback(
-    (pion: any) => {
-      if (!playerId || !nick) return;
-      console.log('[sync] envoi pion:', playerId, pion);
-      chRef.current?.send({
-        type: 'broadcast',
-        event: 'msg',
-        payload: { type: 'pion', playerId, data: { nick, pion } },
-      });
-    },
-    [playerId, nick]
-  );
+  const sendPion = useCallback((pion: any) => {
+    const pid = playerIdRef.current;
+    const nk = nickRef.current;
+    if (!pid || !nk) return;
+    safeSend({ type: 'pion', playerId: pid, data: { nick: nk, pion } });
+  }, [safeSend]);
 
-  const sendVote = useCallback(
-    (vote: any) => {
-      if (!playerId || !nick) return;
-      chRef.current?.send({
-        type: 'broadcast',
-        event: 'msg',
-        payload: { type: 'vote', playerId, data: { nick, vote } },
-      });
-    },
-    [playerId, nick]
-  );
+  const sendVote = useCallback((vote: any) => {
+    const pid = playerIdRef.current;
+    const nk = nickRef.current;
+    if (!pid || !nk) return;
+    safeSend({ type: 'vote', playerId: pid, data: { nick: nk, vote } });
+  }, [safeSend]);
 
   const sendResultat = useCallback((resultat: any) => {
-    chRef.current?.send({
-      type: 'broadcast',
-      event: 'msg',
-      payload: { type: 'resultat', data: { resultat } },
-    });
-  }, []);
+    safeSend({ type: 'resultat', data: { resultat } });
+  }, [safeSend]);
 
   return {
     connected,
